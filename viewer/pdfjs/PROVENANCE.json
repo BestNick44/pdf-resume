@@ -1,0 +1,24 @@
+{
+  "name": "Mozilla PDF.js",
+  "version": "6.1.200",
+  "tag": "v6.1.200",
+  "commit": "6353acefe5007cd4899247a8c4e83cb7c9435a54",
+  "releaseUrl": "https://github.com/mozilla/pdf.js/releases/tag/v6.1.200",
+  "asset": {
+    "name": "pdfjs-6.1.200-dist.zip",
+    "url": "https://github.com/mozilla/pdf.js/releases/download/v6.1.200/pdfjs-6.1.200-dist.zip",
+    "sha256": "9e1584d768ed099aa4be27ea423f89a038c2005f1ee417ea4f35ba4591ec1846"
+  },
+  "license": "Apache-2.0",
+  "runtimeFileCount": 399,
+  "runtimeTreeSha256": "be648426d109d5407c0c25eaf0e48d017cc97c05d02baac84453272507e7cb65",
+  "excludedReleaseFiles": [
+    "build/pdf.mjs.map",
+    "build/pdf.sandbox.mjs.map",
+    "build/pdf.worker.mjs.map",
+    "web/compressed.tracemonkey-pldi-09.pdf",
+    "web/debugger.css",
+    "web/debugger.mjs",
+    "web/viewer.mjs.map"
+  ]
+}
