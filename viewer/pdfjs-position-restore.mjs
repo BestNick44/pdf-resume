@@ -2,13 +2,15 @@ import { samePosition, validPosition } from "../shared/position.mjs";
 
 const PDF_JS_RENDERING_FINISHED = 3;
 const PDF_JS_INITIAL_VIEW_TIMEOUT_MILLISECONDS = 10_000;
-const USER_INTERACTION_EVENTS = [
-  "click",
-  "keydown",
+const TRANSIENT_INTERACTION_IDLE_MILLISECONDS = 250;
+const TRANSIENT_INTERACTION_EVENTS = ["click", "keydown", "wheel"];
+const GESTURE_INTERACTION_EVENTS = [
   "pointerdown",
   "pointerup",
+  "pointercancel",
   "touchstart",
-  "wheel",
+  "touchend",
+  "touchcancel",
 ];
 
 function actualPageCount(application, documentIdentity) {
@@ -20,7 +22,14 @@ function actualPageCount(application, documentIdentity) {
   return Number.isInteger(viewerPages) && viewerPages > 0 ? viewerPages : undefined;
 }
 
-function waitForTargetPage({ eventBus, pageNumber, pdfViewer, signal, navigate }) {
+function waitForTargetPage({
+  eventBus,
+  pageNumber,
+  pdfViewer,
+  renderOutcomes,
+  signal,
+  navigate,
+}) {
   const targetPage = pdfViewer.getPageView?.(pageNumber - 1);
   if (!targetPage) {
     return Promise.reject(new Error(`PDF.js page ${pageNumber} is unavailable.`));
@@ -63,7 +72,8 @@ function waitForTargetPage({ eventBus, pageNumber, pdfViewer, signal, navigate }
 
     navigate();
     if (targetPage.renderingState === PDF_JS_RENDERING_FINISHED) {
-      finish();
+      const outcome = renderOutcomes.outcomeFor(targetPage);
+      finish(outcome?.pageNumber === pageNumber ? outcome.error : undefined);
     }
   });
 }
@@ -232,8 +242,50 @@ function currentPosition(application, container, pagesCount) {
   };
 }
 
+export function createPdfJsRenderOutcomeTracker({ eventBus } = {}) {
+  if (
+    !eventBus ||
+    typeof eventBus.on !== "function" ||
+    typeof eventBus.off !== "function"
+  ) {
+    throw new TypeError("PDF.js render outcomes require an event bus");
+  }
+
+  const outcomes = new WeakMap();
+  let destroyed = false;
+
+  function onPageRendered(event) {
+    if (!event?.source || typeof event.source !== "object") {
+      return;
+    }
+    outcomes.set(event.source, {
+      error: event.error || undefined,
+      pageNumber: event.pageNumber,
+    });
+  }
+
+  eventBus.on("pagerendered", onPageRendered);
+
+  return Object.freeze({
+    destroy() {
+      if (destroyed) {
+        return;
+      }
+      destroyed = true;
+      eventBus.off("pagerendered", onPageRendered);
+    },
+
+    outcomeFor(pageView) {
+      return outcomes.get(pageView);
+    },
+  });
+}
+
 export function createPdfJsRestoreLifecycle({
+  container,
+  eventBus,
   interactionTarget,
+  pdfViewer,
   readPosition,
   scheduler = globalThis,
 } = {}) {
@@ -243,6 +295,17 @@ export function createPdfJsRestoreLifecycle({
     typeof interactionTarget.removeEventListener !== "function"
   ) {
     throw new TypeError("PDF.js interaction target must be an event target");
+  }
+  if (
+    !container ||
+    typeof container.addEventListener !== "function" ||
+    typeof container.removeEventListener !== "function" ||
+    !eventBus ||
+    typeof eventBus.on !== "function" ||
+    typeof eventBus.off !== "function" ||
+    !pdfViewer
+  ) {
+    throw new TypeError("restore lifecycle requires PDF.js position events");
   }
   if (typeof readPosition !== "function") {
     throw new TypeError("restore lifecycle must be able to read the live position");
@@ -255,43 +318,111 @@ export function createPdfJsRestoreLifecycle({
     throw new TypeError("restore lifecycle scheduler is required");
   }
 
-  const requestFrame =
-    typeof scheduler.requestAnimationFrame === "function"
-      ? scheduler.requestAnimationFrame.bind(scheduler)
-      : (callback) => scheduler.setTimeout(callback, 16);
-  const cancelFrame =
-    typeof scheduler.cancelAnimationFrame === "function"
-      ? scheduler.cancelAnimationFrame.bind(scheduler)
-      : scheduler.clearTimeout.bind(scheduler);
   let destroyed = false;
-  let frame;
   let genuinePositionChange = false;
+  let idleTimer;
+  let ignoredPositionChanges = 0;
+  let pointerActive = false;
   let positionBeforeInteraction;
+  let touchActive = false;
 
-  function changedSinceInteraction() {
-    return Boolean(
-      positionBeforeInteraction &&
-        !samePosition(positionBeforeInteraction, validPosition(readPosition())),
+  function intentActive() {
+    return pointerActive || touchActive || idleTimer !== undefined;
+  }
+
+  function cancelIdleTimer() {
+    if (idleTimer !== undefined) {
+      scheduler.clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  }
+
+  function finishIdle() {
+    idleTimer = undefined;
+    if (!pointerActive && !touchActive) {
+      positionBeforeInteraction = undefined;
+    }
+  }
+
+  function scheduleIdle() {
+    cancelIdleTimer();
+    idleTimer = scheduler.setTimeout(
+      finishIdle,
+      TRANSIENT_INTERACTION_IDLE_MILLISECONDS,
     );
   }
 
-  function onInteractionCapture(event) {
-    if (event?.isTrusted !== true) {
-      return;
-    }
+  function beginIntent({ bounded = false } = {}) {
     positionBeforeInteraction ??= validPosition(readPosition());
-    if (frame === undefined) {
-      frame = requestFrame(() => {
-        frame = undefined;
-        genuinePositionChange ||= changedSinceInteraction();
-        positionBeforeInteraction = undefined;
-      });
+    if (bounded) {
+      scheduleIdle();
+    } else {
+      cancelIdleTimer();
     }
   }
 
-  for (const type of USER_INTERACTION_EVENTS) {
-    interactionTarget.addEventListener(type, onInteractionCapture, true);
+  function observePositionActivity() {
+    if (
+      genuinePositionChange ||
+      ignoredPositionChanges > 0 ||
+      !intentActive() ||
+      !positionBeforeInteraction
+    ) {
+      return;
+    }
+    genuinePositionChange = !samePosition(
+      positionBeforeInteraction,
+      validPosition(readPosition()),
+    );
   }
+
+  function onTransientInteraction(event) {
+    if (event?.isTrusted === true) {
+      beginIntent({ bounded: true });
+    }
+  }
+
+  function onGestureInteraction(event) {
+    if (event?.isTrusted !== true) {
+      return;
+    }
+    switch (event.type) {
+      case "pointerdown":
+        pointerActive = true;
+        beginIntent();
+        break;
+      case "touchstart":
+        touchActive = true;
+        beginIntent();
+        break;
+      case "pointerup":
+      case "pointercancel":
+        pointerActive = false;
+        scheduleIdle();
+        break;
+      case "touchend":
+      case "touchcancel":
+        touchActive = false;
+        scheduleIdle();
+        break;
+    }
+  }
+
+  function onViewAreaUpdate({ source } = {}) {
+    if (source === pdfViewer) {
+      observePositionActivity();
+    }
+  }
+
+  for (const type of TRANSIENT_INTERACTION_EVENTS) {
+    interactionTarget.addEventListener(type, onTransientInteraction, true);
+  }
+  for (const type of GESTURE_INTERACTION_EVENTS) {
+    interactionTarget.addEventListener(type, onGestureInteraction, true);
+  }
+  eventBus.on("pagechanging", onViewAreaUpdate);
+  eventBus.on("updateviewarea", onViewAreaUpdate);
+  container.addEventListener("scroll", observePositionActivity, { passive: true });
 
   return Object.freeze({
     destroy() {
@@ -299,18 +430,33 @@ export function createPdfJsRestoreLifecycle({
         return;
       }
       destroyed = true;
-      if (frame !== undefined) {
-        cancelFrame(frame);
-        frame = undefined;
-      }
+      cancelIdleTimer();
       positionBeforeInteraction = undefined;
-      for (const type of USER_INTERACTION_EVENTS) {
-        interactionTarget.removeEventListener(type, onInteractionCapture, true);
+      for (const type of TRANSIENT_INTERACTION_EVENTS) {
+        interactionTarget.removeEventListener(type, onTransientInteraction, true);
       }
+      for (const type of GESTURE_INTERACTION_EVENTS) {
+        interactionTarget.removeEventListener(type, onGestureInteraction, true);
+      }
+      eventBus.off("pagechanging", onViewAreaUpdate);
+      eventBus.off("updateviewarea", onViewAreaUpdate);
+      container.removeEventListener("scroll", observePositionActivity);
     },
 
     hasGenuineInteraction() {
-      return genuinePositionChange || changedSinceInteraction();
+      return genuinePositionChange;
+    },
+
+    runWithoutObserving(operation) {
+      ignoredPositionChanges += 1;
+      try {
+        return operation();
+      } finally {
+        ignoredPositionChanges -= 1;
+        if (!genuinePositionChange && intentActive()) {
+          positionBeforeInteraction = validPosition(readPosition());
+        }
+      }
     },
   });
 }
@@ -322,6 +468,7 @@ export async function restorePdfJsPosition({
   eventBus,
   interaction,
   isCurrent,
+  renderOutcomes,
   savedPosition,
   scheduler = globalThis,
   signal,
@@ -340,9 +487,13 @@ export async function restorePdfJsPosition({
     !interaction ||
     typeof interaction.hasGenuineInteraction !== "function" ||
     typeof isCurrent !== "function" ||
+    !renderOutcomes ||
+    typeof renderOutcomes.outcomeFor !== "function" ||
     typeof startTracking !== "function"
   ) {
-    throw new TypeError("document lifecycle, interaction, and tracker operations are required");
+    throw new TypeError(
+      "document lifecycle, render outcomes, interaction, and tracker operations are required",
+    );
   }
   if (
     !scheduler ||
@@ -406,9 +557,17 @@ export async function restorePdfJsPosition({
       eventBus,
       pageNumber,
       pdfViewer: application.pdfViewer,
+      renderOutcomes,
       signal: active.signal,
       navigate() {
-        application.pdfViewer.currentPageNumber = pageNumber;
+        const navigateToPage = () => {
+          application.pdfViewer.currentPageNumber = pageNumber;
+        };
+        if (typeof interaction.runWithoutObserving === "function") {
+          interaction.runWithoutObserving(navigateToPage);
+        } else {
+          navigateToPage();
+        }
       },
     });
     if (!pageReady || !isCurrent()) {
@@ -434,7 +593,14 @@ export async function restorePdfJsPosition({
     }
 
     if (bounds) {
-      container.scrollTop = restoredPosition.scrollTop;
+      const restoreScroll = () => {
+        container.scrollTop = restoredPosition.scrollTop;
+      };
+      if (typeof interaction.runWithoutObserving === "function") {
+        interaction.runWithoutObserving(restoreScroll);
+      } else {
+        restoreScroll();
+      }
     }
     restoredPosition.scrollTop = currentPosition(
       application,

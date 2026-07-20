@@ -114,6 +114,7 @@ function createRestoreHarness({
         hasGenuineInteraction: () => genuineInteraction,
       },
       isCurrent: () => application.pdfDocument === documentIdentity,
+      renderOutcomes: { outcomeFor: () => undefined },
       savedPosition,
       scheduler: time.scheduler,
       signal: controller.signal,

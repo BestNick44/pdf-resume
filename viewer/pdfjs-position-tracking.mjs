@@ -1,12 +1,14 @@
 import { samePosition, validPosition } from "../shared/position.mjs";
 import { BooksStorageDataError } from "../storage/books.mjs";
 import {
+  createPdfJsRenderOutcomeTracker,
   createPdfJsRestoreLifecycle,
   restorePdfJsPosition,
 } from "./pdfjs-position-restore.mjs";
 import { createPositionSaveController } from "./position-save-controller.mjs";
 
 const DEFAULT_INITIAL_READ_RETRY_DELAYS = Object.freeze([250, 1_000, 4_000]);
+const PDF_JS_INITIALIZATION_TIMEOUT_MILLISECONDS = 10_000;
 
 function readViewerPosition(application) {
   return {
@@ -25,6 +27,45 @@ function validateRetryDelays(delays) {
   return [...delays];
 }
 
+function waitForInitialization(initializedPromise, scheduler, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+
+    function finish(error, initialized = true) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      scheduler.clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      if (error) {
+        reject(error);
+      } else {
+        resolve(initialized);
+      }
+    }
+
+    function onAbort() {
+      finish(undefined, false);
+    }
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      finish(undefined, false);
+      return;
+    }
+    timer = scheduler.setTimeout(
+      () => finish(new Error("PDF.js application initialization timed out.")),
+      PDF_JS_INITIALIZATION_TIMEOUT_MILLISECONDS,
+    );
+    Promise.resolve(initializedPromise).then(
+      () => finish(),
+      (error) => finish(error),
+    );
+  });
+}
+
 export function createPdfJsPositionTracking({
   fileUrl,
   frame,
@@ -36,6 +77,7 @@ export function createPdfJsPositionTracking({
   clock = { now: () => Date.now() },
   initialReadRetryDelays = DEFAULT_INITIAL_READ_RETRY_DELAYS,
   restorePosition = restorePdfJsPosition,
+  createRenderOutcomeTracker = createPdfJsRenderOutcomeTracker,
   createRestoreLifecycle = createPdfJsRestoreLifecycle,
   createSaveController = createPositionSaveController,
   reportError = (error) => console.error("Unable to restore PDF position.", error),
@@ -55,6 +97,7 @@ export function createPdfJsPositionTracking({
     typeof updatePosition !== "function" ||
     typeof handoffPosition !== "function" ||
     typeof restorePosition !== "function" ||
+    typeof createRenderOutcomeTracker !== "function" ||
     typeof createRestoreLifecycle !== "function" ||
     typeof createSaveController !== "function" ||
     typeof reportError !== "function"
@@ -78,6 +121,8 @@ export function createPdfJsPositionTracking({
   let originalDocument;
   let activatingDocument;
   let activationAbort;
+  let initializationAbort;
+  let renderOutcomes;
   let restoreLifecycle;
   let restoringPosition;
   let restorationHandoffSent = false;
@@ -152,7 +197,11 @@ export function createPdfJsPositionTracking({
   }
 
   function removeViewerListeners({ flush = false } = {}) {
+    initializationAbort?.abort();
+    initializationAbort = undefined;
     removePositionListeners({ flush });
+    renderOutcomes?.destroy();
+    renderOutcomes = undefined;
     if (eventBus && pagesInitListener) {
       eventBus.off("pagesinit", pagesInitListener);
     }
@@ -259,9 +308,15 @@ export function createPdfJsPositionTracking({
     let restoreAbort;
 
     try {
+      const activeApplication = application;
+      const bus = eventBus;
+      const container = activeApplication.appConfig.mainContainer;
       lifecycle = createRestoreLifecycle({
+        container,
+        eventBus: bus,
         interactionTarget: frame.contentWindow,
-        readPosition: () => readViewerPosition(application),
+        pdfViewer: activeApplication.pdfViewer,
+        readPosition: () => readViewerPosition(activeApplication),
         scheduler,
       });
       restoreLifecycle = lifecycle;
@@ -271,9 +326,6 @@ export function createPdfJsPositionTracking({
       }
 
       restoringPosition = validPosition(book, "saved position");
-      const activeApplication = application;
-      const bus = eventBus;
-      const container = activeApplication.appConfig.mainContainer;
       restoreAbort = new AbortController();
       activationAbort = restoreAbort;
       await restorePosition({
@@ -283,6 +335,7 @@ export function createPdfJsPositionTracking({
         eventBus: bus,
         interaction: lifecycle,
         isCurrent: () => isCurrentDocument(documentIdentity, expectedGeneration),
+        renderOutcomes,
         savedPosition: book,
         scheduler,
         signal: restoreAbort.signal,
@@ -345,13 +398,17 @@ export function createPdfJsPositionTracking({
     }
   }
 
-  async function initializeFrame(expectedGeneration, frameWindow) {
+  async function initializeFrame(expectedGeneration, frameWindow, signal) {
     const nextApplication = frameWindow?.PDFViewerApplication;
     if (!nextApplication?.initializedPromise) {
       return;
     }
-    await nextApplication.initializedPromise;
     if (
+      !(await waitForInitialization(
+        nextApplication.initializedPromise,
+        scheduler,
+        signal,
+      )) ||
       generation !== expectedGeneration ||
       frame.contentWindow !== frameWindow ||
       !nextApplication.eventBus ||
@@ -363,6 +420,7 @@ export function createPdfJsPositionTracking({
 
     application = nextApplication;
     eventBus = nextApplication.eventBus;
+    renderOutcomes = createRenderOutcomeTracker({ eventBus });
     pagesInitListener = (event) => handlePagesInit(expectedGeneration, event);
     pagesDestroyListener = (event) => handlePagesDestroy(expectedGeneration, event);
     eventBus.on("pagesinit", pagesInitListener);
@@ -377,11 +435,23 @@ export function createPdfJsPositionTracking({
     removeViewerListeners({ flush: true });
     const expectedGeneration = generation;
     const frameWindow = frame.contentWindow;
-    setupPromise = initializeFrame(expectedGeneration, frameWindow).catch((error) => {
-      if (generation === expectedGeneration) {
-        reportError(error);
-      }
-    });
+    const pendingInitialization = new AbortController();
+    initializationAbort = pendingInitialization;
+    setupPromise = initializeFrame(
+      expectedGeneration,
+      frameWindow,
+      pendingInitialization.signal,
+    )
+      .catch((error) => {
+        if (generation === expectedGeneration) {
+          reportError(error);
+        }
+      })
+      .finally(() => {
+        if (initializationAbort === pendingInitialization) {
+          initializationAbort = undefined;
+        }
+      });
   }
 
   function flushLivePosition() {
@@ -403,9 +473,8 @@ export function createPdfJsPositionTracking({
     } else {
       if (
         restorationHandoffSent ||
-        !restoringPosition ||
         !restoreLifecycle?.hasGenuineInteraction() ||
-        samePosition(position, restoringPosition)
+        (restoringPosition && samePosition(position, restoringPosition))
       ) {
         return;
       }
