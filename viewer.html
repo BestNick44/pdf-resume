@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pdf-resume viewer</title>
+    <link rel="stylesheet" href="viewer/viewer.css" />
+    <script src="viewer/viewer-entry.mjs" type="module"></script>
+  </head>
+  <body>
+    <main id="viewerError" role="alert" hidden>
+      <h1>Unable to open PDF</h1>
+      <p id="viewerErrorMessage"></p>
+    </main>
+    <iframe id="pdfViewer" title="PDF viewer" hidden></iframe>
+  </body>
+</html>

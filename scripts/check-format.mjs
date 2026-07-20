@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, "..");
 const ignoredDirectories = new Set([".git", "node_modules"]);
+const vendorDirectories = new Set([path.join(projectRoot, "viewer", "pdfjs")]);
 const textExtensions = new Set([".css", ".html", ".js", ".json", ".md", ".mjs"]);
 
 async function sourceFiles(directory) {
@@ -18,7 +19,11 @@ async function sourceFiles(directory) {
     }
 
     const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory() && !ignoredDirectories.has(entry.name)) {
+    if (
+      entry.isDirectory() &&
+      !ignoredDirectories.has(entry.name) &&
+      !vendorDirectories.has(entryPath)
+    ) {
       files.push(...(await sourceFiles(entryPath)));
     } else if (entry.isFile() && textExtensions.has(path.extname(entry.name))) {
       files.push(entryPath);

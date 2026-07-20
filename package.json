@@ -5,7 +5,7 @@
   "description": "A Chrome and Brave extension that remembers reading position in local PDFs.",
   "scripts": {
     "format:check": "node scripts/check-format.mjs",
-    "lint": "node --check background.js && node --check scripts/check-format.mjs && node --check test/extension-contract.test.mjs",
+    "lint": "node --check background.js && node --check viewer/viewer-entry.mjs && node --check viewer/viewer-url.mjs && node --check scripts/check-format.mjs && node --check test/extension-contract.test.mjs",
     "test": "node --test test/extension-contract.test.mjs",
     "check": "npm run format:check && npm run lint && npm test"
   },
