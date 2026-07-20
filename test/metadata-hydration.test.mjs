@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createBooksStorage } from "../storage/books.mjs";
+import { BooksStorageDataError, createBooksStorage } from "../storage/books.mjs";
 import {
   normalizePdfMetadataTitle,
   resolveAutomaticBookTitle,
@@ -77,6 +77,7 @@ class FakeEventBus extends FakeEventTarget {
 }
 
 function createHydrationHarness({
+  fileUrl = BOOK_URL,
   getBook = async () => canonicalRecord(),
   getMetadata = async () => ({ info: { Title: "PDF metadata title" } }),
   hydrateMetadata = async () => canonicalRecord({
@@ -98,7 +99,7 @@ function createHydrationHarness({
   frame.contentWindow = { PDFViewerApplication: application };
   const errors = [];
   const hydration = createPdfJsMetadataHydration({
-    fileUrl: BOOK_URL,
+    fileUrl,
     frame,
     getBook,
     hydrateMetadata,
@@ -154,6 +155,13 @@ test("absent, blank, control, URL, and path-like metadata titles use the filenam
     );
   }
   assert.equal(resolveAutomaticBookTitle(undefined, BOOK_URL), "日本語 Notes Final");
+  const malformed = {};
+  Object.defineProperty(malformed, "info", {
+    get() {
+      assert.fail("malformed metadata accessors must not run");
+    },
+  });
+  assert.equal(resolveAutomaticBookTitle(malformed, BOOK_URL), "日本語 Notes Final");
 });
 
 test("filename fallback decodes Unicode and removes only separator noise and PDF extension", () => {
@@ -168,8 +176,33 @@ test("filename fallback decodes Unicode and removes only separator noise and PDF
   );
 });
 
-test("first hydration stores actual pages and automatic title without disturbing reader state", async () => {
-  const existing = canonicalRecord();
+test("filename cleanup retains an extensionless basename or a deterministic lowercase fallback", () => {
+  assert.equal(titleFromLocalPdfFilename("file:///tmp/---___.pdf"), "---___");
+  assert.equal(titleFromLocalPdfFilename("file:///tmp/%20---%20.pdf"), "---");
+  assert.equal(titleFromLocalPdfFilename("file:///tmp/.pdf"), "untitled");
+});
+
+test("an all-separator filename still permits title and page-count hydration", async () => {
+  const fileUrl = "file:///tmp/---___.pdf";
+  const writes = [];
+  const harness = createHydrationHarness({
+    fileUrl,
+    getMetadata: async () => ({ info: { Title: "  " } }),
+    hydrateMetadata: async (...args) => writes.push(args),
+  });
+
+  await harness.start();
+
+  assert.deepEqual(writes[0].slice(0, 2), [
+    fileUrl,
+    { title: "---___", totalPages: 7 },
+  ]);
+  assert.deepEqual(harness.errors, []);
+  harness.hydration.destroy();
+});
+
+test("first hydration stores actual pages below a stale page without disturbing reader state", async () => {
+  const existing = canonicalRecord({ currentPage: 12 });
   const fake = createChromeStorageFake({ books: { [BOOK_URL]: existing } });
   const books = createBooksStorage({
     storageArea: fake.local,
@@ -188,6 +221,7 @@ test("first hydration stores actual pages and automatic title without disturbing
     totalPages: 7,
   });
   assert.deepEqual(fake.snapshot().books[BOOK_URL], hydrated);
+  assert.deepEqual(await books.getBook(BOOK_URL), hydrated);
 });
 
 test("hydrated records are a durable no-op and do not churn storage or timestamps", async () => {
@@ -255,6 +289,47 @@ test("a failed metadata attempt is nonfatal and retries on a later open", async 
   retried.hydration.destroy();
 });
 
+test("malformed persisted state rejects getBook nonfatally without metadata or state churn", async () => {
+  const malformed = canonicalRecord({ title: 42 });
+  const fake = createChromeStorageFake({ books: { [BOOK_URL]: malformed } });
+  const books = createBooksStorage({ storageArea: fake.local, lockManager: fake.locks });
+  let metadataCalls = 0;
+  const harness = createHydrationHarness({
+    getBook: books.getBook,
+    getMetadata: async () => {
+      metadataCalls += 1;
+    },
+    hydrateMetadata: books.hydrateMetadata,
+  });
+
+  await harness.start();
+
+  assert.equal(metadataCalls, 0);
+  assert.equal(harness.errors.length, 1);
+  assert.ok(harness.errors[0] instanceof BooksStorageDataError);
+  assert.deepEqual(fake.snapshot().books[BOOK_URL], malformed);
+  assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
+  harness.hydration.destroy();
+});
+
+test("a rejected metadata write is nonfatal and leaves state and timestamps unchanged", async () => {
+  const existing = canonicalRecord();
+  const fake = createChromeStorageFake({ books: { [BOOK_URL]: existing } });
+  const books = createBooksStorage({ storageArea: fake.local, lockManager: fake.locks });
+  const failure = new Error("metadata quota exceeded");
+  fake.failNext("set", failure);
+  const harness = createHydrationHarness({
+    getBook: books.getBook,
+    hydrateMetadata: books.hydrateMetadata,
+  });
+
+  await harness.start();
+
+  assert.deepEqual(harness.errors, [failure]);
+  assert.deepEqual(fake.snapshot().books[BOOK_URL], existing);
+  harness.hydration.destroy();
+});
+
 test("untracked direct viewer use never fetches metadata or writes storage", async () => {
   let metadataCalls = 0;
   let writes = 0;
@@ -309,6 +384,58 @@ test("metadata hydration serializes with concurrent position and rename updates"
     scrollTop: 700,
     lastReadAt: 1_800_000_000,
   });
+});
+
+test("competing hydration attempts write once and preserve the first durable result", async () => {
+  const existing = canonicalRecord();
+  const fake = createChromeStorageFake({ books: { [BOOK_URL]: existing } });
+  const firstStore = createBooksStorage({ storageArea: fake.local, lockManager: fake.locks });
+  const secondStore = createBooksStorage({ storageArea: fake.local, lockManager: fake.locks });
+  const heldWrite = fake.holdNext("set");
+
+  const firstHydration = firstStore.hydrateMetadata(BOOK_URL, {
+    title: "First title",
+    totalPages: 7,
+  });
+  await heldWrite.started;
+  const secondHydration = secondStore.hydrateMetadata(BOOK_URL, {
+    title: "Competing title",
+    totalPages: 9,
+  });
+  heldWrite.release();
+
+  const expected = { ...existing, title: "First title", totalPages: 7 };
+  assert.deepEqual(await firstHydration, expected);
+  assert.deepEqual(await secondHydration, expected);
+  assert.deepEqual(fake.snapshot().books[BOOK_URL], expected);
+  assert.equal(
+    fake.operations.filter(({ method, phase }) => method === "set" && phase === "start").length,
+    1,
+  );
+});
+
+test("an untrack queued after hydration still leaves the book absent", async () => {
+  const existing = canonicalRecord();
+  const fake = createChromeStorageFake({ books: { [BOOK_URL]: existing } });
+  const metadataStore = createBooksStorage({ storageArea: fake.local, lockManager: fake.locks });
+  const removeStore = createBooksStorage({ storageArea: fake.local, lockManager: fake.locks });
+  const heldWrite = fake.holdNext("set");
+
+  const hydration = metadataStore.hydrateMetadata(BOOK_URL, {
+    title: "Hydrated title",
+    totalPages: 7,
+  });
+  await heldWrite.started;
+  const removal = removeStore.removeBook(BOOK_URL);
+  heldWrite.release();
+
+  assert.deepEqual(await hydration, {
+    ...existing,
+    title: "Hydrated title",
+    totalPages: 7,
+  });
+  assert.equal(await removal, true);
+  assert.deepEqual(fake.snapshot().books, {});
 });
 
 test("an untrack that wins the lock prevents stale hydration from recreating the record", async () => {

@@ -159,7 +159,6 @@ function validateRecord(value) {
     validateField(field, descriptor.value);
     record[field] = descriptor.value;
   }
-  validatePageRange(record);
   if (record.lastReadAt < record.addedAt) {
     throw new TypeError("lastReadAt must not precede addedAt");
   }
@@ -307,7 +306,9 @@ export function createBooksStorage({
               lastReadAt: timestamp,
               ...validPatch,
             };
-        validatePageRange(updated);
+        if (Object.hasOwn(validPatch, "totalPages")) {
+          validatePageRange(updated);
+        }
         books[canonicalUrl] = updated;
         await storageArea.set({ [BOOKS_KEY]: books });
         return clone(updated);
@@ -328,7 +329,6 @@ export function createBooksStorage({
           return clone(existing);
         }
         const updated = { ...existing, ...validPatch };
-        validatePageRange(updated);
         if (signal?.aborted) {
           return undefined;
         }
@@ -365,7 +365,9 @@ export function createBooksStorage({
           ...validPatch,
           lastReadAt: Math.max(existing.lastReadAt, currentTimestamp(now)),
         };
-        validatePageRange(updated);
+        if (Object.hasOwn(validPatch, "currentPage")) {
+          validatePageRange(updated);
+        }
         books[canonicalUrl] = updated;
         await storageArea.set({ [BOOKS_KEY]: books });
         return clone(updated);

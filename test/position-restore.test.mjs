@@ -261,17 +261,18 @@ test("page-only and scroll-only saved values are both honored", async (t) => {
   });
 });
 
-test("saved bounds clamp against the loaded replacement document and current viewport", async () => {
+test("a persisted stale page clamps only against the loaded document at runtime", async () => {
   const harness = createRestoreHarness({
     clientHeight: 500,
     documentPages: 3,
     scrollHeight: 2_000,
   });
-  const restored = harness.start({
+  const savedPosition = {
     currentPage: 18,
     scrollTop: 9_000,
-    totalPages: 20,
-  });
+    totalPages: 3,
+  };
+  const restored = harness.start(savedPosition);
   await harness.render(3);
   await harness.finishLayout();
   await restored;
@@ -279,6 +280,11 @@ test("saved bounds clamp against the loaded replacement document and current vie
   assert.deepEqual(harness.navigation, [3]);
   assert.equal(harness.container.scrollTop, 1_500);
   assert.deepEqual(harness.starts, [{ currentPage: 3, scrollTop: 1_500 }]);
+  assert.deepEqual(savedPosition, {
+    currentPage: 18,
+    scrollTop: 9_000,
+    totalPages: 3,
+  });
 });
 
 test("unknown saved totalPages uses the actual loaded document page count", async () => {

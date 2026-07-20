@@ -1649,7 +1649,8 @@ test("production composition wires canonical boot, actual tracking, worker hando
   assert.deepEqual(revoked, [BLOB_URL]);
 });
 
-test("production composition routes tracking failures to a nonfatal view warning", async () => {
+test("production composition reports metadata and restore failures independently", async () => {
+  const metadataError = new Error("metadata write failed");
   const trackingError = new BooksStorageDataError("stored books are malformed");
   const warnings = [];
   const hostWindow = new FakeEventTarget();
@@ -1664,14 +1665,19 @@ test("production composition routes tracking failures to a nonfatal view warning
     ["#viewerWarningMessage", {}],
   ]);
   hostDocument.querySelector = (selector) => elements.get(selector);
-  let reportedError;
+  let reportMetadataError;
+  let reportTrackingError;
 
   const app = await startViewerApp({
     hostDocument,
     hostWindow,
     bootViewerOperation: async () => ({ fileUrl: BOOK_URL, objectUrl: BLOB_URL }),
+    createMetadataHydration(options) {
+      reportMetadataError = options.reportError;
+      return { destroy() {} };
+    },
     createPositionTracking(options) {
-      reportedError = options.reportError;
+      reportTrackingError = options.reportError;
       return { destroy() {}, handoff() {} };
     },
     createView() {
@@ -1684,8 +1690,13 @@ test("production composition routes tracking failures to a nonfatal view warning
     revokeObjectUrl() {},
   });
 
-  reportedError(trackingError);
+  reportMetadataError(metadataError);
+  reportTrackingError(trackingError);
   assert.deepEqual(warnings, [
+    {
+      error: metadataError,
+      message: "The book title and page count could not be saved. You can keep reading this PDF.",
+    },
     {
       error: trackingError,
       message: "The saved reading position could not be restored. You can keep reading this PDF.",

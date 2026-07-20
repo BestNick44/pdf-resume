@@ -124,7 +124,7 @@ test("upsert applies only supplied fields and preserves unrelated newer data", a
   assert.deepEqual(fake.snapshot().books[BOOK_A], updated);
 });
 
-test("upsert validates the complete resulting page range before writing", async () => {
+test("upsert rejects an explicit total that is below the preserved current page", async () => {
   const existing = canonicalRecord({ currentPage: 200, totalPages: 300 });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
   const books = createTestBooksStorage(fake);
@@ -156,6 +156,16 @@ test("position updates preserve metadata and only advance position and last-read
   assert.equal(updated.addedAt, existing.addedAt);
 });
 
+test("position updates reject an explicit page above the known total", async () => {
+  const existing = canonicalRecord({ currentPage: 200, totalPages: 300 });
+  const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
+  const books = createTestBooksStorage(fake);
+
+  await assert.rejects(() => books.updatePosition(BOOK_A, { currentPage: 301 }), /currentPage/i);
+  assert.deepEqual(fake.snapshot().books[BOOK_A], existing);
+  assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
+});
+
 test("position updates can patch one position field and keep timestamps monotonic", async () => {
   const existing = canonicalRecord({ lastReadAt: 1_900_000_000 });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
@@ -172,6 +182,16 @@ test("position update for an untracked book is a no-op", async () => {
 
   assert.equal(await books.updatePosition(BOOK_A, { currentPage: 2 }), undefined);
   assert.deepEqual(fake.snapshot(), { books: { [BOOK_B]: canonicalRecord() } });
+  assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
+});
+
+test("a stale current page above a known total remains readable without state churn", async () => {
+  const existing = canonicalRecord({ currentPage: 12, totalPages: 7 });
+  const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
+  const books = createTestBooksStorage(fake);
+
+  assert.deepEqual(await books.getBook(BOOK_A), existing);
+  assert.deepEqual(fake.snapshot().books[BOOK_A], existing);
   assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
 });
 
@@ -320,7 +340,6 @@ test("malformed persisted books state is reported and never rewritten", async (t
     ["bad title", { [BOOK_A]: canonicalRecord({ title: 5 }) }],
     ["bad custom title", { [BOOK_A]: canonicalRecord({ customTitle: undefined }) }],
     ["bad total pages", { [BOOK_A]: canonicalRecord({ totalPages: -1 }) }],
-    ["page beyond total", { [BOOK_A]: canonicalRecord({ currentPage: 301 }) }],
     [
       "non-finite scroll omitted during Chrome serialization",
       { [BOOK_A]: canonicalRecord({ scrollTop: Number.NaN }) },

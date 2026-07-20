@@ -25,7 +25,18 @@ export function normalizePdfMetadataTitle(value) {
 }
 
 export function titleFromPdfMetadata(metadataResult) {
-  const info = metadataResult?.info;
+  if (
+    metadataResult === null ||
+    typeof metadataResult !== "object" ||
+    Array.isArray(metadataResult)
+  ) {
+    return undefined;
+  }
+  const infoDescriptor = Object.getOwnPropertyDescriptor(metadataResult, "info");
+  if (!infoDescriptor || !("value" in infoDescriptor)) {
+    return undefined;
+  }
+  const info = infoDescriptor.value;
   if (info === null || typeof info !== "object" || Array.isArray(info)) {
     return undefined;
   }
@@ -45,7 +56,11 @@ export function titleFromLocalPdfFilename(fileUrl) {
     .replace(/-{2,}/gu, " ")
     .replace(/\s+[-–—]\s+/gu, " ")
     .replace(/^[\s._–—-]+|[\s._–—-]+$/gu, "");
-  return normalizeWhitespace(cleaned);
+  return (
+    normalizeWhitespace(cleaned) ||
+    normalizeWhitespace(withoutExtension) ||
+    "untitled"
+  );
 }
 
 export function resolveAutomaticBookTitle(metadataResult, fileUrl) {
