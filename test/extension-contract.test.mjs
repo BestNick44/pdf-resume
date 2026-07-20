@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -146,29 +146,85 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   }
 });
 
-test("background module entry point statically imports only the shared storage module", async () => {
+test("background entry registers the private ordered position-update handler", async () => {
   const manifest = await readManifest();
   const workerPath = resolveExtensionPath(manifest.background.service_worker);
   const worker = await readFile(workerPath, "utf8");
 
   await execFileAsync(process.execPath, ["--check", workerPath]);
   assert.equal(manifest.background.type, "module");
-  assert.equal(worker.trim(), 'import "./storage/books.mjs";');
+  assert.match(
+    worker,
+    /import \{ createPositionUpdateMessageHandler \} from "\.\/shared\/position-update-messaging\.mjs";/,
+  );
+  assert.match(worker, /import \{ updatePosition \} from "\.\/storage\/books\.mjs";/);
+  assert.match(worker, /runtime\.onMessage\.addListener/);
+  assert.match(worker, /createPositionUpdateMessageHandler\(\{ extensionId: runtime\.id, updatePosition \}\)/);
+  await assertFileExists("shared/position-update-messaging.mjs");
   await assertFileExists("storage/books.mjs");
 });
 
-test("popup and viewer module entry points statically load the shared storage module", async () => {
+test("popup and viewer entry points load their app-owned modules", async () => {
   const popup = await readFile(resolveExtensionPath("popup/popup.html"), "utf8");
   const popupEntry = await readFile(resolveExtensionPath("popup/popup-entry.mjs"), "utf8");
   const viewer = await readFile(resolveExtensionPath("viewer.html"), "utf8");
   const viewerEntry = await readFile(resolveExtensionPath("viewer/viewer-entry.mjs"), "utf8");
+  const viewerApp = await readFile(resolveExtensionPath("viewer/viewer-app.mjs"), "utf8");
 
   assert.match(popup, /<script src="popup-entry\.mjs" type="module"><\/script>/i);
   assert.equal(popupEntry.trim(), 'import "../storage/books.mjs";');
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
-  assert.match(viewerEntry, /^import "\.\.\/storage\/books\.mjs";/);
+  assert.match(viewerEntry, /^import \{ startViewerApp \} from "\.\/viewer-app\.mjs";/);
+  assert.match(viewerApp, /import \{ getBook \} from "\.\.\/storage\/books\.mjs";/);
+  assert.match(
+    viewerApp,
+    /import \{ createPdfJsPositionTracking \} from "\.\/pdfjs-position-tracking\.mjs";/,
+  );
+  assert.match(viewerApp, /createPositionTracking\(\{/);
+  assert.match(viewerApp, /handoffPosition: positionUpdates\.handoffPosition/);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-entry.mjs")]);
+  await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-app.mjs")]);
+});
+
+test("production viewer entry bootstraps the viewer app", async () => {
+  const viewerEntryUrl = pathToFileURL(
+    resolveExtensionPath("viewer/viewer-entry.mjs"),
+  ).href;
+  const script = `
+    const selectors = [];
+    const elements = {
+      "#pdfViewer": { hidden: true, src: "" },
+      "#viewerError": { hidden: true },
+      "#viewerErrorMessage": { textContent: "" },
+    };
+    globalThis.window = { location: { search: "" } };
+    globalThis.document = {
+      querySelector(selector) {
+        selectors.push(selector);
+        return elements[selector];
+      },
+    };
+    await import(${JSON.stringify(viewerEntryUrl)});
+    process.stdout.write(JSON.stringify({
+      errorHidden: elements["#viewerError"].hidden,
+      errorMessage: elements["#viewerErrorMessage"].textContent,
+      selectors,
+    }));
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    script,
+  ]);
+
+  assert.deepEqual(JSON.parse(stdout), {
+    errorHidden: false,
+    errorMessage:
+      "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.",
+    selectors: ["#pdfViewer", "#viewerError", "#viewerErrorMessage"],
+  });
 });
 
 test("shared storage module exposes its API without resolving extension globals on import", async () => {
@@ -269,7 +325,10 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
     view: createViewerView({ frame, errorPanel, errorMessage }),
   });
 
-  assert.equal(result, objectUrl);
+  assert.deepEqual(result, {
+    fileUrl: "file:///tmp/My%20Book.pdf",
+    objectUrl,
+  });
   assert.deepEqual(fetchCalls, [
     [
       "file:///tmp/My%20Book.pdf",
@@ -570,6 +629,10 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer.html",
     "viewer/viewer.css",
     "viewer/viewer-entry.mjs",
+    "viewer/viewer-app.mjs",
+    "viewer/pdfjs-position-tracking.mjs",
+    "viewer/position-save-controller.mjs",
+    "shared/position-update-messaging.mjs",
     "viewer/viewer-boot.mjs",
     "viewer/viewer-url.mjs",
     "viewer/viewer-view.mjs",
