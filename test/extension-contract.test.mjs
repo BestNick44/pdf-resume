@@ -91,7 +91,10 @@ test("manifest declares the milestone-one MV3 contract", async () => {
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(manifest.permissions, ["storage", "webNavigation", "tabs"]);
   assert.deepEqual(manifest.host_permissions, ["file:///*"]);
-  assert.deepEqual(manifest.background, { service_worker: "background.js" });
+  assert.deepEqual(manifest.background, {
+    service_worker: "background.js",
+    type: "module",
+  });
   assert.deepEqual(manifest.action, {
     default_title: "pdf-resume",
     default_popup: "popup/popup.html",
@@ -143,13 +146,26 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   }
 });
 
-test("background worker is valid JavaScript with no milestone-one side effects", async () => {
+test("background worker loads the shared storage module without feature side effects", async () => {
   const manifest = await readManifest();
   const workerPath = resolveExtensionPath(manifest.background.service_worker);
   const worker = await readFile(workerPath, "utf8");
 
   await execFileAsync(process.execPath, ["--check", workerPath]);
-  assert.equal(worker.trim(), "");
+  assert.equal(manifest.background.type, "module");
+  assert.equal(worker.trim(), 'import "./storage/books.mjs";');
+  await assertFileExists("storage/books.mjs");
+});
+
+test("shared storage API is an importable packaged module for every extension context", async () => {
+  const storageModule = await import("../storage/books.mjs");
+
+  assert.deepEqual(
+    ["getBook", "upsertBook", "removeBook", "listBooks", "updatePosition"].filter(
+      (operation) => typeof storageModule[operation] !== "function",
+    ),
+    [],
+  );
 });
 
 test("viewer accepts one canonically encoded local PDF URL", async () => {
