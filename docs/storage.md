@@ -22,8 +22,17 @@ Lock acquisition is bounded at 25 seconds, below Chrome's approximately 30-secon
 
 All app writers must use this module and the Web Locks API must be available. A direct `chrome.storage.local.set({ books: ... })` writer would violate the serialization contract and can lose concurrent changes. The lock serializes cooperating live contexts, but neither Web Locks nor `chrome.storage.local` provides durable transaction atomicity if a context is terminated during the read-modify-write sequence. Reads may observe either the complete value before or after a completed mutation.
 
+## Viewer position delivery
+
+The viewer never calls `storage/books.mjs` `updatePosition` directly. Normal debounced saves and the final lifecycle snapshot use the private, validated `runtime.sendMessage` protocol in [`shared/position-update-messaging.mjs`](../shared/position-update-messaging.mjs). The service worker orders accepted messages by receipt and is the only position writer; its listener returns literal `true`, awaits this module's `updatePosition`, and responds only after that operation settles. Thus a lifecycle snapshot received while an older normal save is in flight runs afterward and wins without competing viewer and worker writers.
+
+While the viewer is live, a rejected normal save retries after 250 ms, 1 second, and 4 seconds. Exhausting those attempts retains the newest snapshot without a pending timer so a later observation or lifecycle event can try it again. The controller's `settled()` waits only for an active write attempt and returns explicit `durable`, `pending`, and `retryPending` state; it does not wait through a scheduled retry or imply durability. Initial tracked-book reads use the same bounded delays, cancel when their document generation retires, and do not retry malformed persisted state.
+
+A `pagehide` handler can synchronously invoke `runtime.sendMessage`, but it cannot synchronously await the returned promise or prove that `chrome.storage.local` is durable before page teardown. The worker's open response channel moves the asynchronous work out of the dying page and materially improves the handoff, but abrupt browser/process shutdown or service-worker termination can still lose an unfinished mutation. Visibility changes that leave the page alive continue through the awaited normal save path.
+
 Sources:
 
 - [Chrome Storage API](https://developer.chrome.com/docs/extensions/reference/api/storage)
+- [Chrome extension messaging](https://developer.chrome.com/docs/extensions/develop/concepts/messaging)
 - [Chrome extension service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)
 - [LockManager.request()](https://developer.mozilla.org/en-US/docs/Web/API/LockManager/request)

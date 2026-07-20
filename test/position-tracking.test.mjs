@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createBooksStorage } from "../storage/books.mjs";
+import {
+  BooksStorageDataError,
+  createBooksStorage,
+} from "../storage/books.mjs";
+import {
+  createPositionUpdateClient,
+  createPositionUpdateMessageHandler,
+} from "../shared/position-update-messaging.mjs";
 import { createPdfJsPositionTracking } from "../viewer/pdfjs-position-tracking.mjs";
 import { createPositionSaveController } from "../viewer/position-save-controller.mjs";
+import { startViewerApp } from "../viewer/viewer-app.mjs";
 import { createChromeStorageFake } from "./support/chrome-storage-fake.mjs";
 import { createFakeScheduler } from "./support/fake-scheduler.mjs";
 
@@ -23,6 +31,12 @@ function canonicalRecord(overrides = {}) {
   };
 }
 
+async function drainMicrotasks() {
+  for (let turn = 0; turn < 5; turn += 1) {
+    await Promise.resolve();
+  }
+}
+
 function deferred() {
   let resolve;
   let reject;
@@ -33,7 +47,11 @@ function deferred() {
   return { promise, reject, resolve };
 }
 
-function createController({ initialPosition = { currentPage: 1, scrollTop: 0 }, update } = {}) {
+function createController({
+  initialPosition = { currentPage: 1, scrollTop: 0 },
+  retryDelaysMilliseconds,
+  update,
+} = {}) {
   const time = createFakeScheduler();
   const calls = [];
   const controller = createPositionSaveController({
@@ -47,8 +65,25 @@ function createController({ initialPosition = { currentPage: 1, scrollTop: 0 }, 
       }),
     scheduler: time.scheduler,
     clock: time.clock,
+    retryDelaysMilliseconds,
   });
   return { calls, controller, time };
+}
+
+function createMessageBridge(handler, extensionId = "abcdefghijkl") {
+  const keptAlive = [];
+  const responses = [];
+  return {
+    keptAlive,
+    responses,
+    sendMessage(message) {
+      const response = new Promise((resolve) => {
+        keptAlive.push(handler(message, { id: extensionId }, resolve));
+      });
+      responses.push(response);
+      return response;
+    },
+  };
 }
 
 class FakeEventTarget {
@@ -99,11 +134,15 @@ class FakeEventBus {
   }
 }
 
-function createPdfJsHarness({ getBook = async () => canonicalRecord(), updatePosition } = {}) {
+function createPdfJsHarness({
+  getBook = async () => canonicalRecord(),
+  handoffPosition = () => {},
+  initialReadRetryDelays,
+  updatePosition,
+} = {}) {
   const time = createFakeScheduler();
   const hostDocument = new FakeEventTarget();
   hostDocument.visibilityState = "visible";
-  const hostWindow = new FakeEventTarget();
   const container = new FakeEventTarget();
   container.scrollTop = 0;
   const eventBus = new FakeEventBus();
@@ -123,8 +162,9 @@ function createPdfJsHarness({ getBook = async () => canonicalRecord(), updatePos
     fileUrl: BOOK_URL,
     frame,
     hostDocument,
-    hostWindow,
     getBook,
+    handoffPosition,
+    initialReadRetryDelays,
     updatePosition:
       updatePosition ??
       (async (fileUrl, position) => {
@@ -154,7 +194,6 @@ function createPdfJsHarness({ getBook = async () => canonicalRecord(), updatePos
     firstDocument,
     frame,
     hostDocument,
-    hostWindow,
     ready,
     time,
     tracking,
@@ -248,7 +287,7 @@ test("overlapping saves are serialized and the newest snapshot wins", async () =
   ]);
 });
 
-test("a failed snapshot is retained and retried without an unhandled rejection", async () => {
+test("a failed snapshot retries automatically without an unhandled rejection", async () => {
   const calls = [];
   let shouldFail = true;
   const { controller, time } = createController({
@@ -266,13 +305,81 @@ test("a failed snapshot is retained and retried without an unhandled rejection",
   time.advanceBy(1_000);
   await controller.settled();
   assert.equal(calls.length, 1);
-  controller.observe({ currentPage: 6, scrollTop: 60 });
-  time.advanceBy(1_000);
+  assert.equal(time.pendingCount(), 1);
+  time.advanceBy(250);
   await controller.settled();
 
   assert.deepEqual(calls.map(({ position }) => position), [
     { currentPage: 6, scrollTop: 60 },
     { currentPage: 6, scrollTop: 60 },
+  ]);
+});
+
+test("automatic save retries are bounded and settled reports pending durability", async () => {
+  const calls = [];
+  const { controller, time } = createController({
+    retryDelaysMilliseconds: [100, 200],
+    update: async (fileUrl, position) => {
+      calls.push({ fileUrl, position });
+      throw new Error("storage unavailable");
+    },
+  });
+
+  controller.observe({ currentPage: 6, scrollTop: 60 });
+  time.advanceBy(1_000);
+  assert.deepEqual(await controller.settled(), {
+    disabled: false,
+    durable: false,
+    pending: true,
+    retryPending: true,
+  });
+  time.advanceBy(99);
+  assert.equal(calls.length, 1);
+  time.advanceBy(1);
+  await controller.settled();
+  time.advanceBy(199);
+  assert.equal(calls.length, 2);
+  time.advanceBy(1);
+  assert.deepEqual(await controller.settled(), {
+    disabled: false,
+    durable: false,
+    pending: true,
+    retryPending: false,
+  });
+  assert.equal(calls.length, 3);
+  time.advanceBy(10_000);
+  assert.equal(calls.length, 3, "terminal attempts must not spin forever");
+
+  await controller.flush();
+  assert.equal(calls.length, 4, "a later lifecycle flush retries the retained snapshot");
+  controller.destroy();
+});
+
+test("a newer observation replaces a failed in-flight snapshot before retry", async () => {
+  const firstWrite = deferred();
+  const calls = [];
+  const { controller, time } = createController({
+    update: async (fileUrl, position) => {
+      calls.push({ fileUrl, position });
+      if (calls.length === 1) {
+        await firstWrite.promise;
+      }
+      return { ...canonicalRecord(), ...position };
+    },
+  });
+
+  controller.observe({ currentPage: 2, scrollTop: 20 });
+  time.advanceBy(1_000);
+  await Promise.resolve();
+  controller.observe({ currentPage: 7, scrollTop: 700 });
+  firstWrite.reject(new Error("old write failed"));
+  await controller.settled();
+  time.advanceBy(1_000);
+  await controller.settled();
+
+  assert.deepEqual(calls.map(({ position }) => position), [
+    { currentPage: 2, scrollTop: 20 },
+    { currentPage: 7, scrollTop: 700 },
   ]);
 });
 
@@ -320,6 +427,110 @@ test("PDF.js tracking waits for iframe, application, viewer, and tracked-book re
   harness.tracking.destroy();
 });
 
+test("a transient initial tracked-book read retries while the document remains active", async () => {
+  let reads = 0;
+  const harness = createPdfJsHarness({
+    getBook: async () => {
+      reads += 1;
+      if (reads === 1) {
+        throw new Error("storage temporarily unavailable");
+      }
+      return canonicalRecord();
+    },
+    initialReadRetryDelays: [250],
+  });
+
+  await harness.ready();
+  assert.equal(reads, 1);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.time.pendingCount(), 1);
+  harness.time.advanceBy(250);
+  await harness.tracking.settled();
+
+  assert.equal(reads, 2);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+  harness.tracking.destroy();
+});
+
+test("initial tracked-book retries are bounded, cancellable, and terminal for malformed state", async (t) => {
+  await t.test("bounded transient failures", async () => {
+    let reads = 0;
+    const harness = createPdfJsHarness({
+      getBook: async () => {
+        reads += 1;
+        throw new Error("storage unavailable");
+      },
+      initialReadRetryDelays: [100, 200],
+    });
+
+    await harness.ready();
+    harness.time.advanceBy(100);
+    await drainMicrotasks();
+    harness.time.advanceBy(200);
+    await harness.tracking.settled();
+    assert.equal(reads, 3);
+    assert.equal(harness.time.pendingCount(), 0);
+    assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+    harness.tracking.destroy();
+  });
+
+  await t.test("teardown cancellation", async () => {
+    let reads = 0;
+    const harness = createPdfJsHarness({
+      getBook: async () => {
+        reads += 1;
+        throw new Error("storage unavailable");
+      },
+      initialReadRetryDelays: [100],
+    });
+
+    await harness.ready();
+    assert.equal(harness.time.pendingCount(), 1);
+    harness.tracking.destroy();
+    assert.equal(harness.time.pendingCount(), 0);
+    harness.time.advanceBy(100);
+    assert.equal(reads, 1);
+  });
+
+  await t.test("document replacement cancellation", async () => {
+    let reads = 0;
+    const harness = createPdfJsHarness({
+      getBook: async () => {
+        reads += 1;
+        throw new Error("storage unavailable");
+      },
+      initialReadRetryDelays: [100],
+    });
+
+    await harness.ready();
+    assert.equal(harness.time.pendingCount(), 1);
+    harness.application.pdfDocument = { id: "replacement" };
+    harness.eventBus.dispatch("pagesinit", { source: harness.application.pdfViewer });
+    assert.equal(harness.time.pendingCount(), 0);
+    harness.time.advanceBy(100);
+    assert.equal(reads, 1);
+    harness.tracking.destroy();
+  });
+
+  await t.test("malformed persisted state", async () => {
+    let reads = 0;
+    const harness = createPdfJsHarness({
+      getBook: async () => {
+        reads += 1;
+        throw new BooksStorageDataError("stored books are malformed");
+      },
+      initialReadRetryDelays: [100, 200],
+    });
+
+    await harness.ready();
+    await harness.tracking.settled();
+    assert.equal(reads, 1);
+    assert.equal(harness.time.pendingCount(), 0);
+    assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+    harness.tracking.destroy();
+  });
+});
+
 test("real PDF.js page and canonical container scroll events are coalesced", async () => {
   const harness = createPdfJsHarness();
   await harness.ready();
@@ -355,18 +566,31 @@ test("untracked and missing records never register position listeners or create 
 
   assert.deepEqual(harness.calls, []);
   assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 0);
   harness.tracking.destroy();
 });
 
-test("pagehide and hidden visibility flush the latest live PDF.js position", async () => {
-  const harness = createPdfJsHarness();
+test("pagehide hands off synchronously while hidden visibility uses the ordered save path", async () => {
+  const handoffs = [];
+  const harness = createPdfJsHarness({
+    handoffPosition(fileUrl, position) {
+      handoffs.push({ fileUrl, position });
+    },
+  });
   await harness.ready();
 
   harness.application.pdfViewer.currentPageNumber = 8;
   harness.container.scrollTop = 810;
   harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
-  harness.hostWindow.dispatch("pagehide");
-  await harness.tracking.settled();
+  harness.tracking.handoff();
+  assert.deepEqual(handoffs, [
+    {
+      fileUrl: BOOK_URL,
+      position: { currentPage: 8, scrollTop: 810 },
+    },
+  ]);
+  assert.deepEqual(harness.calls, []);
+
   harness.application.pdfViewer.currentPageNumber = 9;
   harness.container.scrollTop = 920;
   harness.eventBus.dispatch("updateviewarea", { source: harness.application.pdfViewer });
@@ -375,7 +599,6 @@ test("pagehide and hidden visibility flush the latest live PDF.js position", asy
   await harness.tracking.settled();
 
   assert.deepEqual(harness.calls.map(({ position }) => position), [
-    { currentPage: 8, scrollTop: 810 },
     { currentPage: 9, scrollTop: 920 },
   ]);
   harness.tracking.destroy();
@@ -401,9 +624,283 @@ test("listeners are registered once and removed on teardown or document replacem
 
   harness.tracking.destroy();
   assert.equal(harness.frame.listenerCount("load"), 0);
-  assert.equal(harness.hostWindow.listenerCount("pagehide"), 0);
   assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 0);
   assert.equal(harness.eventBus.listenerCount("pagesinit"), 0);
+});
+
+test("pagehide handoff queues behind an older worker write and wins without a duplicate viewer writer", async () => {
+  const firstWrite = deferred();
+  const workerCalls = [];
+  const completedPositions = [];
+  const fake = createChromeStorageFake({
+    books: { [BOOK_URL]: canonicalRecord() },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+  });
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePosition: async (fileUrl, position) => {
+      workerCalls.push({ fileUrl, position });
+      if (workerCalls.length === 1) {
+        await firstWrite.promise;
+      }
+      const updated = await storage.updatePosition(fileUrl, position);
+      completedPositions.push(position);
+      return updated;
+    },
+  });
+  const bridge = createMessageBridge(handler);
+  const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
+  const harness = createPdfJsHarness({
+    handoffPosition: client.handoffPosition,
+    updatePosition: client.updatePosition,
+  });
+  await harness.ready();
+
+  harness.application.pdfViewer.currentPageNumber = 2;
+  harness.container.scrollTop = 200;
+  harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
+  harness.time.advanceBy(1_000);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(workerCalls.length, 1);
+
+  harness.application.pdfViewer.currentPageNumber = 3;
+  harness.container.scrollTop = 300;
+  harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
+  harness.tracking.handoff();
+  assert.equal(bridge.responses.length, 2, "handoff must call sendMessage before teardown");
+  assert.deepEqual(bridge.keptAlive, [true, true]);
+  harness.tracking.destroy();
+
+  await drainMicrotasks();
+  const positionsEnteredBeforeRelease = workerCalls.map(({ position }) => position);
+
+  firstWrite.resolve();
+  await Promise.all(bridge.responses);
+  assert.deepEqual(
+    positionsEnteredBeforeRelease,
+    [{ currentPage: 2, scrollTop: 200 }],
+    "the handoff must not enter storage while the older write is in flight",
+  );
+  assert.deepEqual(workerCalls.map(({ position }) => position), [
+    { currentPage: 2, scrollTop: 200 },
+    { currentPage: 3, scrollTop: 300 },
+  ]);
+  assert.deepEqual(completedPositions, [
+    { currentPage: 2, scrollTop: 200 },
+    { currentPage: 3, scrollTop: 300 },
+  ]);
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 3, scrollTop: 300 },
+  );
+});
+
+test("worker messaging validates private canonical updates and never creates an untracked book", async () => {
+  const fake = createChromeStorageFake();
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+  });
+  let updateCalls = 0;
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePosition: async (...args) => {
+      updateCalls += 1;
+      return storage.updatePosition(...args);
+    },
+  });
+  const bridge = createMessageBridge(handler);
+  const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
+
+  assert.equal(
+    await client.updatePosition(BOOK_URL, { currentPage: 2, scrollTop: 20 }),
+    undefined,
+  );
+  assert.deepEqual(fake.snapshot(), {});
+  assert.equal(updateCalls, 1);
+
+  let sendCalls = 0;
+  const rejectingClient = createPositionUpdateClient({
+    sendMessage() {
+      sendCalls += 1;
+    },
+  });
+  await assert.rejects(
+    rejectingClient.updatePosition("file:///Users/reader/Books/A Book.pdf", {
+      currentPage: 2,
+      scrollTop: 20,
+    }),
+    /canonical/i,
+  );
+  assert.equal(sendCalls, 0);
+
+  let invalidResponse;
+  const keptInvalidChannel = handler(
+    {
+      type: "pdf-resume/private/update-position",
+      fileUrl: "https://example.test/book.pdf",
+      position: { currentPage: 2, scrollTop: 20 },
+    },
+    { id: "abcdefghijkl" },
+    (response) => {
+      invalidResponse = response;
+    },
+  );
+  assert.equal(keptInvalidChannel, false);
+  assert.deepEqual(invalidResponse, {
+    type: "pdf-resume/private/update-position-result",
+    status: "invalid",
+  });
+  assert.equal(updateCalls, 1);
+
+  let privateResponse;
+  assert.equal(
+    handler(
+      {
+        type: "pdf-resume/private/update-position",
+        fileUrl: BOOK_URL,
+        position: { currentPage: 2, scrollTop: 20 },
+      },
+      { id: "another-extension" },
+      (response) => {
+        privateResponse = response;
+      },
+    ),
+    false,
+  );
+  assert.equal(privateResponse.status, "invalid");
+  assert.equal(updateCalls, 1);
+
+  let unknownResponse = false;
+  assert.equal(
+    handler({ type: "other" }, { id: "abcdefghijkl" }, () => {
+      unknownResponse = true;
+    }),
+    false,
+  );
+  assert.equal(unknownResponse, false);
+
+  const failedHandoffs = [
+    createPositionUpdateClient({
+      sendMessage() {
+        throw new Error("worker unavailable");
+      },
+    }),
+    createPositionUpdateClient({
+      async sendMessage() {
+        throw new Error("worker stopped");
+      },
+    }),
+  ];
+  for (const failedClient of failedHandoffs) {
+    assert.doesNotThrow(() =>
+      failedClient.handoffPosition(BOOK_URL, {
+        currentPage: 2,
+        scrollTop: 20,
+      }),
+    );
+  }
+  await drainMicrotasks();
+});
+
+test("production composition wires canonical boot, actual tracking, worker handoff, and teardown", async () => {
+  const hostWindow = new FakeEventTarget();
+  hostWindow.location = { search: "?file=ignored-by-injected-boot" };
+  const hostDocument = new FakeEventTarget();
+  hostDocument.visibilityState = "visible";
+  const container = new FakeEventTarget();
+  container.scrollTop = 0;
+  const eventBus = new FakeEventBus();
+  const application = {
+    appConfig: { mainContainer: container },
+    eventBus,
+    initializedPromise: Promise.resolve(),
+    pdfDocument: { id: "production-document" },
+    pdfViewer: { currentPageNumber: 1, pagesCount: 20 },
+  };
+  const frame = new FakeEventTarget();
+  frame.contentWindow = { PDFViewerApplication: application };
+  const errorPanel = {};
+  const errorMessage = {};
+  hostDocument.querySelector = (selector) =>
+    new Map([
+      ["#pdfViewer", frame],
+      ["#viewerError", errorPanel],
+      ["#viewerErrorMessage", errorMessage],
+    ]).get(selector);
+  const workerCalls = [];
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePosition: async (fileUrl, position) => {
+      workerCalls.push({ fileUrl, position });
+      return { ...canonicalRecord(), ...position };
+    },
+  });
+  const bridge = createMessageBridge(handler);
+  const revoked = [];
+  const bootCalls = [];
+  let getBookCalls = 0;
+
+  const app = await startViewerApp({
+    hostDocument,
+    hostWindow,
+    fetchPdf: async () => {},
+    createObjectUrl: () => "unused",
+    revokeObjectUrl(objectUrl) {
+      revoked.push(objectUrl);
+    },
+    sendMessage: bridge.sendMessage,
+    getBookOperation: async () => {
+      getBookCalls += 1;
+      return canonicalRecord();
+    },
+    bootViewerOperation: async (options) => {
+      bootCalls.push(options);
+      return { fileUrl: BOOK_URL, objectUrl: BLOB_URL };
+    },
+    createView: (elements) => elements,
+  });
+
+  assert.equal(bootCalls.length, 1);
+  assert.equal(bootCalls[0].search, hostWindow.location.search);
+  assert.deepEqual(bootCalls[0].view, { errorPanel, errorMessage, frame });
+  assert.equal(app.viewer.fileUrl, BOOK_URL);
+  frame.dispatch("load");
+  await drainMicrotasks();
+  assert.equal(getBookCalls, 1);
+  assert.equal(eventBus.listenerCount("pagechanging"), 1);
+
+  application.pdfViewer.currentPageNumber = 2;
+  container.scrollTop = 200;
+  hostDocument.visibilityState = "hidden";
+  hostDocument.dispatch("visibilitychange");
+  await app.positionTracking.settled();
+
+  application.pdfViewer.currentPageNumber = 3;
+  container.scrollTop = 300;
+  hostWindow.dispatch("pagehide");
+  await Promise.all(bridge.responses);
+  assert.deepEqual(workerCalls.map(({ fileUrl, position }) => ({ fileUrl, position })), [
+    { fileUrl: BOOK_URL, position: { currentPage: 2, scrollTop: 200 } },
+    { fileUrl: BOOK_URL, position: { currentPage: 3, scrollTop: 300 } },
+  ]);
+  assert.deepEqual(revoked, [BLOB_URL]);
+  assert.equal(frame.listenerCount("load"), 0);
+  assert.equal(hostDocument.listenerCount("visibilitychange"), 0);
+  assert.equal(hostWindow.listenerCount("pagehide"), 0);
+  app.destroy();
+  assert.deepEqual(revoked, [BLOB_URL]);
+});
+
+test("viewer entry can be imported without extension globals", async () => {
+  await import(`../viewer/viewer-entry.mjs?test=${Date.now()}`);
 });
 
 test("actual storage update preserves metadata and advances its module-managed timestamp", async () => {
@@ -414,14 +911,21 @@ test("actual storage update preserves metadata and advances its module-managed t
     lockManager: fake.locks,
     now: () => 1_800_000_000,
   });
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePosition: storage.updatePosition,
+  });
+  const bridge = createMessageBridge(handler);
+  const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
   const { controller } = createController({
     initialPosition: existing,
-    update: storage.updatePosition,
+    update: client.updatePosition,
   });
 
   controller.observe({ currentPage: 10, scrollTop: 1_010 });
   await controller.flush();
 
+  assert.deepEqual(bridge.keptAlive, [true]);
   assert.deepEqual(fake.snapshot().books[BOOK_URL], {
     ...existing,
     currentPage: 10,

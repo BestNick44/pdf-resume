@@ -1,4 +1,7 @@
+import { BooksStorageDataError } from "../storage/books.mjs";
 import { createPositionSaveController } from "./position-save-controller.mjs";
+
+const DEFAULT_INITIAL_READ_RETRY_DELAYS = Object.freeze([250, 1_000, 4_000]);
 
 function readViewerPosition(application) {
   return {
@@ -7,22 +10,52 @@ function readViewerPosition(application) {
   };
 }
 
+function validateRetryDelays(delays) {
+  if (
+    !Array.isArray(delays) ||
+    delays.some((delay) => !Number.isFinite(delay) || delay < 0)
+  ) {
+    throw new TypeError("initial read retry delays must be non-negative numbers");
+  }
+  return [...delays];
+}
+
 export function createPdfJsPositionTracking({
   fileUrl,
   frame,
   hostDocument,
-  hostWindow,
   getBook,
   updatePosition,
+  handoffPosition,
   scheduler = globalThis,
   clock = { now: () => Date.now() },
+  initialReadRetryDelays = DEFAULT_INITIAL_READ_RETRY_DELAYS,
 }) {
   if (!frame || typeof frame.addEventListener !== "function") {
     throw new TypeError("frame must be an event target");
   }
-  if (typeof getBook !== "function" || typeof updatePosition !== "function") {
-    throw new TypeError("book storage operations are required");
+  if (
+    !hostDocument ||
+    typeof hostDocument.addEventListener !== "function" ||
+    typeof hostDocument.removeEventListener !== "function"
+  ) {
+    throw new TypeError("hostDocument must be an event target");
   }
+  if (
+    typeof getBook !== "function" ||
+    typeof updatePosition !== "function" ||
+    typeof handoffPosition !== "function"
+  ) {
+    throw new TypeError("book storage and lifecycle operations are required");
+  }
+  if (
+    !scheduler ||
+    typeof scheduler.setTimeout !== "function" ||
+    typeof scheduler.clearTimeout !== "function"
+  ) {
+    throw new TypeError("scheduler must provide setTimeout and clearTimeout");
+  }
+  const readRetryDelays = validateRetryDelays(initialReadRetryDelays);
 
   let generation = 0;
   let application;
@@ -30,10 +63,36 @@ export function createPdfJsPositionTracking({
   let pagesInitListener;
   let originalDocument;
   let activatingDocument;
+  let readRetry;
   let controller;
   let positionListeners;
   let setupPromise = Promise.resolve();
   const retiring = new Set();
+
+  function cancelReadRetry() {
+    if (!readRetry) {
+      return;
+    }
+    const pending = readRetry;
+    readRetry = undefined;
+    scheduler.clearTimeout(pending.timer);
+    pending.resolve(false);
+  }
+
+  function waitForReadRetry(delay) {
+    return new Promise((resolve) => {
+      const pending = {
+        resolve,
+        timer: scheduler.setTimeout(() => {
+          if (readRetry === pending) {
+            readRetry = undefined;
+          }
+          resolve(true);
+        }, delay),
+      };
+      readRetry = pending;
+    });
+  }
 
   function retireController(flush) {
     const retired = controller;
@@ -45,10 +104,13 @@ export function createPdfJsPositionTracking({
       retired.destroy();
       return;
     }
-    const retirement = retired.flush().finally(() => {
-      retired.destroy();
-      retiring.delete(retirement);
-    });
+    const retirement = retired
+      .flush()
+      .catch(() => {})
+      .finally(() => {
+        retired.destroy();
+        retiring.delete(retirement);
+      });
     retiring.add(retirement);
   }
 
@@ -58,8 +120,10 @@ export function createPdfJsPositionTracking({
       bus.off("pagechanging", onPositionEvent);
       bus.off("updateviewarea", onPositionEvent);
       container.removeEventListener("scroll", onScroll);
+      hostDocument.removeEventListener("visibilitychange", onVisibilityChange);
       positionListeners = undefined;
     }
+    cancelReadRetry();
     retireController(flush);
   }
 
@@ -83,6 +147,28 @@ export function createPdfJsPositionTracking({
     );
   }
 
+  async function readTrackedBook(documentIdentity, expectedGeneration) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await getBook(fileUrl);
+      } catch (error) {
+        if (
+          error instanceof BooksStorageDataError ||
+          attempt >= readRetryDelays.length ||
+          !isCurrentDocument(documentIdentity, expectedGeneration)
+        ) {
+          return undefined;
+        }
+        if (!(await waitForReadRetry(readRetryDelays[attempt]))) {
+          return undefined;
+        }
+        if (!isCurrentDocument(documentIdentity, expectedGeneration)) {
+          return undefined;
+        }
+      }
+    }
+  }
+
   async function activateDocument(documentIdentity, expectedGeneration) {
     if (
       !documentIdentity ||
@@ -94,47 +180,49 @@ export function createPdfJsPositionTracking({
     }
     activatingDocument = documentIdentity;
 
-    let book;
     try {
-      book = await getBook(fileUrl);
-    } catch {
-      return;
+      const book = await readTrackedBook(documentIdentity, expectedGeneration);
+      if (!book || !isCurrentDocument(documentIdentity, expectedGeneration)) {
+        return;
+      }
+
+      const activeApplication = application;
+      const bus = eventBus;
+      const container = activeApplication.appConfig.mainContainer;
+      try {
+        controller = createPositionSaveController({
+          fileUrl,
+          initialPosition: book,
+          updatePosition,
+          scheduler,
+          clock,
+        });
+      } catch {
+        return;
+      }
+
+      const capturePosition = () => {
+        if (!isCurrentDocument(documentIdentity, expectedGeneration)) {
+          return;
+        }
+        controller?.observe(readViewerPosition(activeApplication));
+      };
+      const onPositionEvent = ({ source } = {}) => {
+        if (source === activeApplication.pdfViewer) {
+          capturePosition();
+        }
+      };
+      const onScroll = () => capturePosition();
+      bus.on("pagechanging", onPositionEvent);
+      bus.on("updateviewarea", onPositionEvent);
+      container.addEventListener("scroll", onScroll, { passive: true });
+      hostDocument.addEventListener("visibilitychange", onVisibilityChange);
+      positionListeners = { bus, container, onPositionEvent, onScroll };
     } finally {
       if (activatingDocument === documentIdentity) {
         activatingDocument = undefined;
       }
     }
-    if (!book || !isCurrentDocument(documentIdentity, expectedGeneration)) {
-      return;
-    }
-
-    const activeApplication = application;
-    const bus = eventBus;
-    const container = activeApplication.appConfig.mainContainer;
-    controller = createPositionSaveController({
-      fileUrl,
-      initialPosition: book,
-      updatePosition,
-      scheduler,
-      clock,
-    });
-
-    const capturePosition = () => {
-      if (!isCurrentDocument(documentIdentity, expectedGeneration)) {
-        return;
-      }
-      controller?.observe(readViewerPosition(activeApplication));
-    };
-    const onPositionEvent = ({ source } = {}) => {
-      if (source === activeApplication.pdfViewer) {
-        capturePosition();
-      }
-    };
-    const onScroll = () => capturePosition();
-    bus.on("pagechanging", onPositionEvent);
-    bus.on("updateviewarea", onPositionEvent);
-    container.addEventListener("scroll", onScroll, { passive: true });
-    positionListeners = { bus, container, onPositionEvent, onScroll };
   }
 
   function handlePagesInit(expectedGeneration) {
@@ -144,7 +232,7 @@ export function createPdfJsPositionTracking({
     const documentIdentity = application.pdfDocument;
     if (!originalDocument) {
       originalDocument = documentIdentity;
-      setupPromise = activateDocument(documentIdentity, expectedGeneration);
+      setupPromise = activateDocument(documentIdentity, expectedGeneration).catch(() => {});
       return;
     }
     if (documentIdentity !== originalDocument) {
@@ -192,6 +280,17 @@ export function createPdfJsPositionTracking({
     void controller.flush(readViewerPosition(application));
   }
 
+  function handoffLivePosition() {
+    if (!application || application.pdfDocument !== originalDocument) {
+      return;
+    }
+    try {
+      handoffPosition(fileUrl, readViewerPosition(application));
+    } catch {
+      // The lifecycle sender cannot synchronously wait for or report durable storage.
+    }
+  }
+
   function onVisibilityChange() {
     if (hostDocument.visibilityState === "hidden") {
       flushLivePosition();
@@ -199,21 +298,22 @@ export function createPdfJsPositionTracking({
   }
 
   frame.addEventListener("load", onFrameLoad);
-  hostWindow.addEventListener("pagehide", flushLivePosition);
-  hostDocument.addEventListener("visibilitychange", onVisibilityChange);
 
   return Object.freeze({
+    handoff() {
+      handoffLivePosition();
+    },
+
     async settled() {
       await setupPromise;
-      await controller?.settled();
+      const status = await controller?.settled();
       await Promise.all([...retiring]);
+      return status;
     },
 
     destroy() {
       generation += 1;
       frame.removeEventListener("load", onFrameLoad);
-      hostWindow.removeEventListener("pagehide", flushLivePosition);
-      hostDocument.removeEventListener("visibilitychange", onVisibilityChange);
       removeViewerListeners();
     },
   });

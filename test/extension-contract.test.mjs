@@ -146,29 +146,45 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   }
 });
 
-test("background module entry point statically imports only the shared storage module", async () => {
+test("background entry registers the private ordered position-update handler", async () => {
   const manifest = await readManifest();
   const workerPath = resolveExtensionPath(manifest.background.service_worker);
   const worker = await readFile(workerPath, "utf8");
 
   await execFileAsync(process.execPath, ["--check", workerPath]);
   assert.equal(manifest.background.type, "module");
-  assert.equal(worker.trim(), 'import "./storage/books.mjs";');
+  assert.match(
+    worker,
+    /import \{ createPositionUpdateMessageHandler \} from "\.\/shared\/position-update-messaging\.mjs";/,
+  );
+  assert.match(worker, /import \{ updatePosition \} from "\.\/storage\/books\.mjs";/);
+  assert.match(worker, /runtime\.onMessage\.addListener/);
+  assert.match(worker, /createPositionUpdateMessageHandler\(\{ extensionId: runtime\.id, updatePosition \}\)/);
+  await assertFileExists("shared/position-update-messaging.mjs");
   await assertFileExists("storage/books.mjs");
 });
 
-test("popup and viewer module entry points statically load the shared storage module", async () => {
+test("popup and viewer entry points load their app-owned modules", async () => {
   const popup = await readFile(resolveExtensionPath("popup/popup.html"), "utf8");
   const popupEntry = await readFile(resolveExtensionPath("popup/popup-entry.mjs"), "utf8");
   const viewer = await readFile(resolveExtensionPath("viewer.html"), "utf8");
   const viewerEntry = await readFile(resolveExtensionPath("viewer/viewer-entry.mjs"), "utf8");
+  const viewerApp = await readFile(resolveExtensionPath("viewer/viewer-app.mjs"), "utf8");
 
   assert.match(popup, /<script src="popup-entry\.mjs" type="module"><\/script>/i);
   assert.equal(popupEntry.trim(), 'import "../storage/books.mjs";');
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
-  assert.match(viewerEntry, /^import \{ getBook, updatePosition \} from "\.\.\/storage\/books\.mjs";/);
+  assert.match(viewerEntry, /^import \{ startViewerApp \} from "\.\/viewer-app\.mjs";/);
+  assert.match(viewerApp, /import \{ getBook \} from "\.\.\/storage\/books\.mjs";/);
+  assert.match(
+    viewerApp,
+    /import \{ createPdfJsPositionTracking \} from "\.\/pdfjs-position-tracking\.mjs";/,
+  );
+  assert.match(viewerApp, /createPositionTracking\(\{/);
+  assert.match(viewerApp, /handoffPosition: positionUpdates\.handoffPosition/);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-entry.mjs")]);
+  await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-app.mjs")]);
 });
 
 test("shared storage module exposes its API without resolving extension globals on import", async () => {
@@ -573,8 +589,10 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer.html",
     "viewer/viewer.css",
     "viewer/viewer-entry.mjs",
+    "viewer/viewer-app.mjs",
     "viewer/pdfjs-position-tracking.mjs",
     "viewer/position-save-controller.mjs",
+    "shared/position-update-messaging.mjs",
     "viewer/viewer-boot.mjs",
     "viewer/viewer-url.mjs",
     "viewer/viewer-view.mjs",

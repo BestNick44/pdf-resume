@@ -1,4 +1,5 @@
 const DEFAULT_DEBOUNCE_MILLISECONDS = 1_000;
+const DEFAULT_RETRY_DELAYS_MILLISECONDS = Object.freeze([250, 1_000, 4_000]);
 
 function validatePosition(position) {
   if (
@@ -16,6 +17,16 @@ function validatePosition(position) {
   };
 }
 
+function validateDelays(delays) {
+  if (
+    !Array.isArray(delays) ||
+    delays.some((delay) => !Number.isFinite(delay) || delay < 0)
+  ) {
+    throw new TypeError("retry delays must be an array of non-negative numbers");
+  }
+  return [...delays];
+}
+
 function samePosition(left, right) {
   return (
     left.currentPage === right.currentPage && left.scrollTop === right.scrollTop
@@ -29,6 +40,7 @@ export function createPositionSaveController({
   scheduler = globalThis,
   clock = { now: () => Date.now() },
   debounceMilliseconds = DEFAULT_DEBOUNCE_MILLISECONDS,
+  retryDelaysMilliseconds = DEFAULT_RETRY_DELAYS_MILLISECONDS,
 }) {
   if (typeof fileUrl !== "string") {
     throw new TypeError("fileUrl must be a string");
@@ -49,13 +61,16 @@ export function createPositionSaveController({
   if (!Number.isFinite(debounceMilliseconds) || debounceMilliseconds < 0) {
     throw new TypeError("debounceMilliseconds must be non-negative");
   }
+  const retryDelays = validateDelays(retryDelaysMilliseconds);
 
   let latestPosition = validatePosition(initialPosition);
   let savedPosition = latestPosition;
   let readyPosition;
   let timer;
+  let timerKind;
   let deadline;
   let running;
+  let failedAttempts = 0;
   let destroyed = false;
   let disabled = false;
 
@@ -64,7 +79,26 @@ export function createPositionSaveController({
       scheduler.clearTimeout(timer);
       timer = undefined;
     }
+    timerKind = undefined;
     deadline = undefined;
+  }
+
+  function scheduleTimer(kind, delay) {
+    cancelTimer();
+    timerKind = kind;
+    deadline = clock.now() + delay;
+    timer = scheduler.setTimeout(onDeadline, delay);
+  }
+
+  function scheduleRetry(position) {
+    readyPosition = position;
+    if (failedAttempts >= retryDelays.length) {
+      failedAttempts = 0;
+      return;
+    }
+    const delay = retryDelays[failedAttempts];
+    failedAttempts += 1;
+    scheduleTimer("retry", delay);
   }
 
   function startPump() {
@@ -77,6 +111,7 @@ export function createPositionSaveController({
         const position = readyPosition;
         readyPosition = undefined;
         if (samePosition(position, savedPosition)) {
+          failedAttempts = 0;
           continue;
         }
 
@@ -85,14 +120,22 @@ export function createPositionSaveController({
           if (updated === undefined) {
             disabled = true;
             readyPosition = undefined;
+            cancelTimer();
             break;
           }
           savedPosition = position;
+          failedAttempts = 0;
         } catch {
-          if (!readyPosition) {
-            readyPosition = position;
+          if (readyPosition) {
+            failedAttempts = 0;
+            continue;
+          }
+          if (!samePosition(latestPosition, position)) {
+            failedAttempts = 0;
             break;
           }
+          scheduleRetry(position);
+          break;
         }
       }
     })().finally(() => {
@@ -101,9 +144,12 @@ export function createPositionSaveController({
     return running;
   }
 
-  function makeReady() {
+  function makeReady({ resetFailures = false } = {}) {
     if (destroyed || disabled) {
       return Promise.resolve();
+    }
+    if (resetFailures) {
+      failedAttempts = 0;
     }
     readyPosition = latestPosition;
     return startPump();
@@ -116,14 +162,25 @@ export function createPositionSaveController({
       timer = scheduler.setTimeout(onDeadline, remaining);
       return;
     }
+    const expiredKind = timerKind;
+    timerKind = undefined;
     deadline = undefined;
-    return makeReady();
+    return makeReady({ resetFailures: expiredKind === "debounce" });
   }
 
-  function schedule() {
-    cancelTimer();
-    deadline = clock.now() + debounceMilliseconds;
-    timer = scheduler.setTimeout(onDeadline, debounceMilliseconds);
+  function status() {
+    const durable =
+      !disabled &&
+      !readyPosition &&
+      timer === undefined &&
+      !running &&
+      samePosition(latestPosition, savedPosition);
+    return Object.freeze({
+      disabled,
+      durable,
+      pending: !disabled && !durable,
+      retryPending: timerKind === "retry",
+    });
   }
 
   return Object.freeze({
@@ -133,13 +190,14 @@ export function createPositionSaveController({
       }
       const validPosition = validatePosition(position);
       if (samePosition(validPosition, latestPosition)) {
-        if (readyPosition) {
-          schedule();
+        if (readyPosition && timerKind !== "retry") {
+          scheduleTimer("debounce", debounceMilliseconds);
         }
         return;
       }
       latestPosition = validPosition;
-      schedule();
+      failedAttempts = 0;
+      scheduleTimer("debounce", debounceMilliseconds);
     },
 
     flush(position) {
@@ -150,13 +208,14 @@ export function createPositionSaveController({
         latestPosition = validatePosition(position);
       }
       cancelTimer();
-      return makeReady();
+      return makeReady({ resetFailures: true });
     },
 
     async settled() {
       while (running) {
         await running;
       }
+      return status();
     },
 
     destroy() {
