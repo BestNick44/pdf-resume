@@ -1624,7 +1624,7 @@ test("production composition wires canonical boot, actual tracking, worker hando
     time.advanceBy(16);
     await drainMicrotasks();
   }
-  assert.equal(getBookCalls, 1);
+  assert.equal(getBookCalls, 2, "metadata and position lifecycles each verify tracking");
   assert.equal(eventBus.listenerCount("pagechanging"), 1);
 
   application.pdfViewer.currentPageNumber = 2;

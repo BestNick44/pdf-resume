@@ -13,6 +13,7 @@ const RECORD_FIELDS = [
   "lastReadAt",
 ];
 const UPSERT_FIELDS = new Set(["title", "customTitle", "totalPages"]);
+const HYDRATION_FIELDS = new Set(["title", "totalPages"]);
 const POSITION_FIELDS = new Set(["currentPage", "scrollTop"]);
 
 export class BooksStorageDataError extends Error {
@@ -173,12 +174,38 @@ function validateUpsertPatch(patch) {
   return Object.fromEntries(entries);
 }
 
+function validateHydrationPatch(patch) {
+  const entries = ownDataEntries(patch, HYDRATION_FIELDS, "metadata patch");
+  if (entries.length !== HYDRATION_FIELDS.size) {
+    throw new TypeError("metadata patch must include title and totalPages");
+  }
+  for (const [field, value] of entries) {
+    validateField(field, value);
+  }
+  const validPatch = Object.fromEntries(entries);
+  if (validPatch.totalPages === 0) {
+    throw new TypeError("hydrated totalPages must be positive");
+  }
+  return validPatch;
+}
+
 function validatePositionPatch(patch) {
   const entries = ownDataEntries(patch, POSITION_FIELDS, "position patch");
   for (const [field, value] of entries) {
     validateField(field, value);
   }
   return Object.fromEntries(entries);
+}
+
+function validateAbortSignal(signal) {
+  if (
+    signal !== undefined &&
+    (!signal ||
+      typeof signal.aborted !== "boolean" ||
+      typeof signal.addEventListener !== "function")
+  ) {
+    throw new TypeError("metadata hydration signal must be an AbortSignal");
+  }
 }
 
 function readBooks(storageResult) {
@@ -287,6 +314,30 @@ export function createBooksStorage({
       });
     },
 
+    async hydrateMetadata(fileUrl, patch, { signal } = {}) {
+      const canonicalUrl = canonicalFileUrl(fileUrl);
+      const validPatch = validateHydrationPatch(patch);
+      validateAbortSignal(signal);
+      return mutate(async () => {
+        const books = await loadBooks();
+        const existing = books[canonicalUrl];
+        if (signal?.aborted || !existing) {
+          return undefined;
+        }
+        if (existing.totalPages !== 0) {
+          return clone(existing);
+        }
+        const updated = { ...existing, ...validPatch };
+        validatePageRange(updated);
+        if (signal?.aborted) {
+          return undefined;
+        }
+        books[canonicalUrl] = updated;
+        await storageArea.set({ [BOOKS_KEY]: books });
+        return clone(updated);
+      });
+    },
+
     async removeBook(fileUrl) {
       const canonicalUrl = canonicalFileUrl(fileUrl);
       return mutate(async () => {
@@ -336,6 +387,10 @@ export async function getBook(fileUrl) {
 
 export async function upsertBook(fileUrl, patch) {
   return defaultStorage().upsertBook(fileUrl, patch);
+}
+
+export async function hydrateMetadata(fileUrl, patch, options) {
+  return defaultStorage().hydrateMetadata(fileUrl, patch, options);
 }
 
 export async function removeBook(fileUrl) {
