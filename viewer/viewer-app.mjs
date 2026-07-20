@@ -1,11 +1,14 @@
-import { getBook } from "../storage/books.mjs";
+import { getBook, hydrateMetadata } from "../storage/books.mjs";
 import { createPositionUpdateClient } from "../shared/position-update-messaging.mjs";
+import { createPdfJsMetadataHydration } from "./pdfjs-metadata-hydration.mjs";
 import { createPdfJsPositionTracking } from "./pdfjs-position-tracking.mjs";
 import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
 
 const RESTORE_WARNING =
   "The saved reading position could not be restored. You can keep reading this PDF.";
+const METADATA_WARNING =
+  "The book title and page count could not be saved. You can keep reading this PDF.";
 
 export async function startViewerApp({
   hostDocument = globalThis.document,
@@ -15,9 +18,12 @@ export async function startViewerApp({
   revokeObjectUrl = (url) => globalThis.URL.revokeObjectURL(url),
   sendMessage = (message) => globalThis.chrome.runtime.sendMessage(message),
   getBookOperation = getBook,
+  hydrateMetadataOperation = hydrateMetadata,
   bootViewerOperation = bootViewer,
+  createMetadataHydration = createPdfJsMetadataHydration,
   createPositionTracking = createPdfJsPositionTracking,
   createView = createViewerView,
+  metadataHydrationScheduler = globalThis,
   positionTrackingScheduler = globalThis,
   positionTrackingClock = { now: () => Date.now() },
   pdfJsViewerUrl = new URL("./pdfjs/web/viewer.html", import.meta.url),
@@ -43,6 +49,16 @@ export async function startViewerApp({
   }
 
   const positionUpdates = createPositionUpdateClient({ sendMessage });
+  const metadataHydration = createMetadataHydration({
+    fileUrl: viewer.fileUrl,
+    frame,
+    getBook: getBookOperation,
+    hydrateMetadata: hydrateMetadataOperation,
+    reportError(error) {
+      view.showWarning(METADATA_WARNING, error);
+    },
+    scheduler: metadataHydrationScheduler,
+  });
   const positionTracking = createPositionTracking({
     fileUrl: viewer.fileUrl,
     frame,
@@ -64,6 +80,7 @@ export async function startViewerApp({
     }
     destroyed = true;
     hostWindow.removeEventListener("pagehide", onPageHide);
+    metadataHydration.destroy();
     positionTracking.destroy();
     revokeObjectUrl(viewer.objectUrl);
   }
@@ -74,5 +91,5 @@ export async function startViewerApp({
   }
 
   hostWindow.addEventListener("pagehide", onPageHide);
-  return Object.freeze({ destroy, positionTracking, viewer });
+  return Object.freeze({ destroy, metadataHydration, positionTracking, viewer });
 }

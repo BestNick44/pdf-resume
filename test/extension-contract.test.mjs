@@ -175,11 +175,19 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   assert.equal(popupEntry.trim(), 'import "../storage/books.mjs";');
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
   assert.match(viewerEntry, /^import \{ startViewerApp \} from "\.\/viewer-app\.mjs";/);
-  assert.match(viewerApp, /import \{ getBook \} from "\.\.\/storage\/books\.mjs";/);
+  assert.match(
+    viewerApp,
+    /import \{ getBook, hydrateMetadata \} from "\.\.\/storage\/books\.mjs";/,
+  );
+  assert.match(
+    viewerApp,
+    /import \{ createPdfJsMetadataHydration \} from "\.\/pdfjs-metadata-hydration\.mjs";/,
+  );
   assert.match(
     viewerApp,
     /import \{ createPdfJsPositionTracking \} from "\.\/pdfjs-position-tracking\.mjs";/,
   );
+  assert.match(viewerApp, /createMetadataHydration\(\{/);
   assert.match(viewerApp, /createPositionTracking\(\{/);
   assert.match(viewerApp, /handoffPosition: positionUpdates\.handoffPosition/);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
@@ -239,9 +247,14 @@ test("shared storage module exposes its API without resolving extension globals 
   const storageModule = await import("../storage/books.mjs");
 
   assert.deepEqual(
-    ["getBook", "upsertBook", "removeBook", "listBooks", "updatePosition"].filter(
-      (operation) => typeof storageModule[operation] !== "function",
-    ),
+    [
+      "getBook",
+      "hydrateMetadata",
+      "upsertBook",
+      "removeBook",
+      "listBooks",
+      "updatePosition",
+    ].filter((operation) => typeof storageModule[operation] !== "function"),
     [],
   );
 });
@@ -658,6 +671,9 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer/viewer.css",
     "viewer/viewer-entry.mjs",
     "viewer/viewer-app.mjs",
+    "viewer/book-metadata.mjs",
+    "viewer/pdfjs-initialization.mjs",
+    "viewer/pdfjs-metadata-hydration.mjs",
     "viewer/pdfjs-position-restore.mjs",
     "viewer/pdfjs-position-tracking.mjs",
     "viewer/position-save-controller.mjs",

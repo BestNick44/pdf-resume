@@ -1624,7 +1624,7 @@ test("production composition wires canonical boot, actual tracking, worker hando
     time.advanceBy(16);
     await drainMicrotasks();
   }
-  assert.equal(getBookCalls, 1);
+  assert.equal(getBookCalls, 2, "metadata and position lifecycles each verify tracking");
   assert.equal(eventBus.listenerCount("pagechanging"), 1);
 
   application.pdfViewer.currentPageNumber = 2;
@@ -1649,7 +1649,8 @@ test("production composition wires canonical boot, actual tracking, worker hando
   assert.deepEqual(revoked, [BLOB_URL]);
 });
 
-test("production composition routes tracking failures to a nonfatal view warning", async () => {
+test("production composition reports metadata and restore failures independently", async () => {
+  const metadataError = new Error("metadata write failed");
   const trackingError = new BooksStorageDataError("stored books are malformed");
   const warnings = [];
   const hostWindow = new FakeEventTarget();
@@ -1664,14 +1665,19 @@ test("production composition routes tracking failures to a nonfatal view warning
     ["#viewerWarningMessage", {}],
   ]);
   hostDocument.querySelector = (selector) => elements.get(selector);
-  let reportedError;
+  let reportMetadataError;
+  let reportTrackingError;
 
   const app = await startViewerApp({
     hostDocument,
     hostWindow,
     bootViewerOperation: async () => ({ fileUrl: BOOK_URL, objectUrl: BLOB_URL }),
+    createMetadataHydration(options) {
+      reportMetadataError = options.reportError;
+      return { destroy() {} };
+    },
     createPositionTracking(options) {
-      reportedError = options.reportError;
+      reportTrackingError = options.reportError;
       return { destroy() {}, handoff() {} };
     },
     createView() {
@@ -1684,8 +1690,13 @@ test("production composition routes tracking failures to a nonfatal view warning
     revokeObjectUrl() {},
   });
 
-  reportedError(trackingError);
+  reportMetadataError(metadataError);
+  reportTrackingError(trackingError);
   assert.deepEqual(warnings, [
+    {
+      error: metadataError,
+      message: "The book title and page count could not be saved. You can keep reading this PDF.",
+    },
     {
       error: trackingError,
       message: "The saved reading position could not be restored. You can keep reading this PDF.",
@@ -1699,8 +1710,8 @@ test("viewer entry can be imported without extension globals", async () => {
   await import(`../viewer/viewer-entry.mjs?test=${Date.now()}`);
 });
 
-test("actual storage update preserves metadata and advances its module-managed timestamp", async () => {
-  const existing = canonicalRecord();
+test("actual tracking saves page 8 against stale total 7 without clobbering book state", async () => {
+  const existing = canonicalRecord({ currentPage: 7, totalPages: 7 });
   const fake = createChromeStorageFake({ books: { [BOOK_URL]: existing } });
   const storage = createBooksStorage({
     storageArea: fake.local,
@@ -1718,14 +1729,14 @@ test("actual storage update preserves metadata and advances its module-managed t
     update: client.updatePosition,
   });
 
-  controller.observe({ currentPage: 10, scrollTop: 1_010 });
+  controller.observe({ currentPage: 8, scrollTop: 808 });
   await controller.flush();
 
   assert.deepEqual(bridge.keptAlive, [true]);
   assert.deepEqual(fake.snapshot().books[BOOK_URL], {
     ...existing,
-    currentPage: 10,
-    scrollTop: 1_010,
+    currentPage: 8,
+    scrollTop: 808,
     lastReadAt: 1_800_000_000,
   });
 });
