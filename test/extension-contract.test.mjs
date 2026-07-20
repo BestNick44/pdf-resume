@@ -166,7 +166,7 @@ test("popup and viewer module entry points statically load the shared storage mo
   assert.match(popup, /<script src="popup-entry\.mjs" type="module"><\/script>/i);
   assert.equal(popupEntry.trim(), 'import "../storage/books.mjs";');
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
-  assert.match(viewerEntry, /^import "\.\.\/storage\/books\.mjs";/);
+  assert.match(viewerEntry, /^import \{ getBook, updatePosition \} from "\.\.\/storage\/books\.mjs";/);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-entry.mjs")]);
 });
@@ -269,7 +269,10 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
     view: createViewerView({ frame, errorPanel, errorMessage }),
   });
 
-  assert.equal(result, objectUrl);
+  assert.deepEqual(result, {
+    fileUrl: "file:///tmp/My%20Book.pdf",
+    objectUrl,
+  });
   assert.deepEqual(fetchCalls, [
     [
       "file:///tmp/My%20Book.pdf",
@@ -570,6 +573,8 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer.html",
     "viewer/viewer.css",
     "viewer/viewer-entry.mjs",
+    "viewer/pdfjs-position-tracking.mjs",
+    "viewer/position-save-controller.mjs",
     "viewer/viewer-boot.mjs",
     "viewer/viewer-url.mjs",
     "viewer/viewer-view.mjs",

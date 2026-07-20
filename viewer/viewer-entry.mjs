@@ -1,9 +1,11 @@
-import "../storage/books.mjs";
+import { getBook, updatePosition } from "../storage/books.mjs";
 
+import { createPdfJsPositionTracking } from "./pdfjs-position-tracking.mjs";
 import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
 
-const objectUrl = await bootViewer({
+const frame = document.querySelector("#pdfViewer");
+const viewer = await bootViewer({
   search: window.location.search,
   fetchPdf: fetch,
   createObjectUrl: (blob) => URL.createObjectURL(blob),
@@ -11,12 +13,26 @@ const objectUrl = await bootViewer({
   view: createViewerView({
     errorPanel: document.querySelector("#viewerError"),
     errorMessage: document.querySelector("#viewerErrorMessage"),
-    frame: document.querySelector("#pdfViewer"),
+    frame,
   }),
 });
 
+const positionTracking = viewer
+  ? createPdfJsPositionTracking({
+      fileUrl: viewer.fileUrl,
+      frame,
+      hostDocument: document,
+      hostWindow: window,
+      getBook,
+      updatePosition,
+    })
+  : undefined;
+
 window.addEventListener("pagehide", () => {
-  if (objectUrl) {
-    URL.revokeObjectURL(objectUrl);
+  if (viewer) {
+    URL.revokeObjectURL(viewer.objectUrl);
+  }
+  if (positionTracking) {
+    void positionTracking.settled().finally(() => positionTracking.destroy());
   }
 });

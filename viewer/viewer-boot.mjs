@@ -34,7 +34,7 @@ export async function bootViewer({
 
     const objectUrl = createObjectUrl(pdfBlob);
     view.showViewer(buildPdfJsViewerUrl(objectUrl, fileUrl, pdfJsViewerUrl));
-    return objectUrl;
+    return { fileUrl: fileUrl.href, objectUrl };
   } catch (error) {
     view.showError(error instanceof ViewerInputError ? error.message : READ_ERROR);
   }
