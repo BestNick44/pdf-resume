@@ -610,22 +610,25 @@ test("listeners are registered once and removed on teardown or document replacem
 
   assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
   assert.equal(harness.container.listenerCount("scroll"), 1);
+  harness.application.pdfViewer.currentPageNumber = 10;
+  harness.container.scrollTop = 1_000;
+  harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
   const replacement = { id: "replacement" };
   harness.application.pdfDocument = replacement;
   harness.eventBus.dispatch("pagesinit", { source: harness.application.pdfViewer });
   await Promise.resolve();
   assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
   assert.equal(harness.container.listenerCount("scroll"), 0);
+  assert.equal(harness.eventBus.listenerCount("pagesinit"), 0);
   harness.application.pdfViewer.currentPageNumber = 11;
   harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
   harness.time.advanceBy(1_000);
   await harness.tracking.settled();
-  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.calls, [], "document replacement must not save");
 
   harness.tracking.destroy();
   assert.equal(harness.frame.listenerCount("load"), 0);
   assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 0);
-  assert.equal(harness.eventBus.listenerCount("pagesinit"), 0);
 });
 
 test("pagehide handoff queues behind an older worker write and wins without a duplicate viewer writer", async () => {

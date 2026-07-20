@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -185,6 +185,46 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-app.mjs")]);
+});
+
+test("production viewer entry bootstraps the viewer app", async () => {
+  const viewerEntryUrl = pathToFileURL(
+    resolveExtensionPath("viewer/viewer-entry.mjs"),
+  ).href;
+  const script = `
+    const selectors = [];
+    const elements = {
+      "#pdfViewer": { hidden: true, src: "" },
+      "#viewerError": { hidden: true },
+      "#viewerErrorMessage": { textContent: "" },
+    };
+    globalThis.window = { location: { search: "" } };
+    globalThis.document = {
+      querySelector(selector) {
+        selectors.push(selector);
+        return elements[selector];
+      },
+    };
+    await import(${JSON.stringify(viewerEntryUrl)});
+    process.stdout.write(JSON.stringify({
+      errorHidden: elements["#viewerError"].hidden,
+      errorMessage: elements["#viewerErrorMessage"].textContent,
+      selectors,
+    }));
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    script,
+  ]);
+
+  assert.deepEqual(JSON.parse(stdout), {
+    errorHidden: false,
+    errorMessage:
+      "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.",
+    selectors: ["#pdfViewer", "#viewerError", "#viewerErrorMessage"],
+  });
 });
 
 test("shared storage module exposes its API without resolving extension globals on import", async () => {

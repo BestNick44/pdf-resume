@@ -236,7 +236,7 @@ export function createPdfJsPositionTracking({
       return;
     }
     if (documentIdentity !== originalDocument) {
-      removePositionListeners({ flush: true });
+      removeViewerListeners();
     }
   }
 
