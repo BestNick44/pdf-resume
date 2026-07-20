@@ -197,6 +197,8 @@ test("production viewer entry bootstraps the viewer app", async () => {
       "#pdfViewer": { hidden: true, src: "" },
       "#viewerError": { hidden: true },
       "#viewerErrorMessage": { textContent: "" },
+      "#viewerWarning": { hidden: true },
+      "#viewerWarningMessage": { textContent: "" },
     };
     globalThis.window = { location: { search: "" } };
     globalThis.document = {
@@ -223,7 +225,13 @@ test("production viewer entry bootstraps the viewer app", async () => {
     errorHidden: false,
     errorMessage:
       "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.",
-    selectors: ["#pdfViewer", "#viewerError", "#viewerErrorMessage"],
+    selectors: [
+      "#pdfViewer",
+      "#viewerError",
+      "#viewerErrorMessage",
+      "#viewerWarning",
+      "#viewerWarningMessage",
+    ],
   });
 });
 
@@ -278,6 +286,7 @@ test("viewer shell is accessible and keeps local input out of markup", async () 
 
   assert.match(viewer, /<html\s+lang="en">/i);
   assert.match(viewer, /<main[^>]+id="viewerError"[^>]+role="alert"[^>]+hidden/i);
+  assert.match(viewer, /<aside[^>]+id="viewerWarning"[^>]+role="status"[^>]+hidden/i);
   assert.match(viewer, /<iframe[^>]+id="pdfViewer"[^>]+title="PDF viewer"[^>]+hidden/i);
   assert.match(viewer, /src="viewer\/viewer-entry\.mjs"/i);
   assert.doesNotMatch(viewer, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
@@ -484,13 +493,30 @@ test("viewer view adapter switches between focused viewer and accessible error s
   };
   const errorPanel = { hidden: true };
   const errorMessage = { textContent: "" };
-  const view = createViewerView({ frame, errorPanel, errorMessage });
+  const warningPanel = { hidden: true };
+  const warningMessage = { textContent: "" };
+  const view = createViewerView({
+    frame,
+    errorPanel,
+    errorMessage,
+    warningPanel,
+    warningMessage,
+  });
+
+  view.showWarning("The saved position could not be restored.");
+
+  assert.equal(frame.hidden, false, "a warning must preserve the loaded PDF");
+  assert.equal(errorPanel.hidden, true);
+  assert.equal(warningPanel.hidden, false);
+  assert.equal(warningMessage.textContent, "The saved position could not be restored.");
 
   view.showError("A local error occurred.");
 
   assert.equal(frame.hidden, true);
   assert.equal(errorPanel.hidden, false);
   assert.equal(errorMessage.textContent, "A local error occurred.");
+  assert.equal(warningPanel.hidden, true);
+  assert.equal(warningMessage.textContent, "");
 
   const viewerUrl = new URL(
     "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html?file=blob%3Atest",
@@ -501,6 +527,8 @@ test("viewer view adapter switches between focused viewer and accessible error s
   assert.equal(frame.src, viewerUrl.href);
   assert.equal(errorPanel.hidden, true);
   assert.equal(errorMessage.textContent, "");
+  assert.equal(warningPanel.hidden, true);
+  assert.equal(warningMessage.textContent, "");
   assert.deepEqual(loadOptions, { once: true });
   assert.equal(focusCalls, 0);
   loadListener();
@@ -630,9 +658,11 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer/viewer.css",
     "viewer/viewer-entry.mjs",
     "viewer/viewer-app.mjs",
+    "viewer/pdfjs-position-restore.mjs",
     "viewer/pdfjs-position-tracking.mjs",
     "viewer/position-save-controller.mjs",
     "shared/position-update-messaging.mjs",
+    "shared/position.mjs",
     "viewer/viewer-boot.mjs",
     "viewer/viewer-url.mjs",
     "viewer/viewer-view.mjs",

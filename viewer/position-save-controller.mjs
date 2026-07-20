@@ -1,21 +1,7 @@
+import { samePosition, validPosition } from "../shared/position.mjs";
+
 const DEFAULT_DEBOUNCE_MILLISECONDS = 1_000;
 const DEFAULT_RETRY_DELAYS_MILLISECONDS = Object.freeze([250, 1_000, 4_000]);
-
-function validatePosition(position) {
-  if (
-    !position ||
-    !Number.isInteger(position.currentPage) ||
-    position.currentPage < 1 ||
-    !Number.isFinite(position.scrollTop) ||
-    position.scrollTop < 0
-  ) {
-    throw new TypeError("position must contain a valid currentPage and scrollTop");
-  }
-  return {
-    currentPage: position.currentPage,
-    scrollTop: position.scrollTop,
-  };
-}
 
 function validateDelays(delays) {
   if (
@@ -25,12 +11,6 @@ function validateDelays(delays) {
     throw new TypeError("retry delays must be an array of non-negative numbers");
   }
   return [...delays];
-}
-
-function samePosition(left, right) {
-  return (
-    left.currentPage === right.currentPage && left.scrollTop === right.scrollTop
-  );
 }
 
 export function createPositionSaveController({
@@ -63,7 +43,7 @@ export function createPositionSaveController({
   }
   const retryDelays = validateDelays(retryDelaysMilliseconds);
 
-  let latestPosition = validatePosition(initialPosition);
+  let latestPosition = validPosition(initialPosition);
   let savedPosition = latestPosition;
   let readyPosition;
   let timer;
@@ -184,18 +164,25 @@ export function createPositionSaveController({
   }
 
   return Object.freeze({
+    needsSave(position) {
+      if (destroyed || disabled) {
+        return false;
+      }
+      return !samePosition(validPosition(position), savedPosition);
+    },
+
     observe(position) {
       if (destroyed || disabled) {
         return;
       }
-      const validPosition = validatePosition(position);
-      if (samePosition(validPosition, latestPosition)) {
+      const positionValue = validPosition(position);
+      if (samePosition(positionValue, latestPosition)) {
         if (readyPosition && timerKind !== "retry") {
           scheduleTimer("debounce", debounceMilliseconds);
         }
         return;
       }
-      latestPosition = validPosition;
+      latestPosition = positionValue;
       failedAttempts = 0;
       scheduleTimer("debounce", debounceMilliseconds);
     },
@@ -205,7 +192,7 @@ export function createPositionSaveController({
         return Promise.resolve();
       }
       if (position !== undefined) {
-        latestPosition = validatePosition(position);
+        latestPosition = validPosition(position);
       }
       cancelTimer();
       return makeReady({ resetFailures: true });

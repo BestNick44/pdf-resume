@@ -32,6 +32,15 @@ export function createFakeScheduler(start = 0) {
       clearTimeout(id) {
         tasks.delete(id);
       },
+      requestAnimationFrame(callback) {
+        const id = nextId;
+        nextId += 1;
+        tasks.set(id, { id, callback, time: currentTime + 16 });
+        return id;
+      },
+      cancelAnimationFrame(id) {
+        tasks.delete(id);
+      },
     },
     advanceBy(milliseconds) {
       currentTime += milliseconds;
