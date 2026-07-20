@@ -60,7 +60,9 @@ export function titleFromPdfMetadata(metadataResult) {
 export function titleFromLocalPdfFilename(fileUrl) {
   const url = new URL(fileUrl);
   const encodedFilename = url.pathname.split("/").at(-1);
-  const decodedFilename = decodeURIComponent(encodedFilename).normalize("NFC");
+  const decodedFilename = decodeURIComponent(encodedFilename)
+    .normalize("NFC")
+    .replace(INVISIBLE_OR_CONTROL_FORMATTING, "");
   const withoutExtension = decodedFilename.replace(/\.pdf$/iu, "");
   const cleaned = withoutExtension
     .replace(/_+/gu, " ")

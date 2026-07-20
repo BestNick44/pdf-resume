@@ -12,6 +12,7 @@ const RECORD_FIELDS = [
   "addedAt",
   "lastReadAt",
 ];
+const TRACK_FIELDS = new Set(["title"]);
 const UPSERT_FIELDS = new Set(["title", "customTitle", "totalPages"]);
 const HYDRATION_FIELDS = new Set(["title", "totalPages"]);
 const POSITION_FIELDS = new Set(["currentPage", "scrollTop"]);
@@ -165,6 +166,15 @@ function validateRecord(value) {
   return record;
 }
 
+function validateTrackPatch(patch) {
+  const entries = ownDataEntries(patch, TRACK_FIELDS, "initial book patch");
+  if (entries.length !== 1 || entries[0][0] !== "title") {
+    throw new TypeError("initial book patch must include only title");
+  }
+  validateTitle(entries[0][1], "title");
+  return { title: entries[0][1] };
+}
+
 function validateUpsertPatch(patch) {
   const entries = ownDataEntries(patch, UPSERT_FIELDS, "book patch");
   for (const [field, value] of entries) {
@@ -245,6 +255,19 @@ function currentTimestamp(now) {
   return timestamp;
 }
 
+function createInitialRecord(timestamp, patch) {
+  return {
+    title: "",
+    customTitle: null,
+    totalPages: 0,
+    currentPage: 1,
+    scrollTop: 0,
+    addedAt: timestamp,
+    lastReadAt: timestamp,
+    ...patch,
+  };
+}
+
 export function createBooksStorage({
   storageArea,
   lockManager,
@@ -287,6 +310,23 @@ export function createBooksStorage({
         .map((fileUrl) => ({ fileUrl, book: clone(books[fileUrl]) }));
     },
 
+    async trackBook(fileUrl, patch) {
+      const canonicalUrl = canonicalFileUrl(fileUrl);
+      const validPatch = validateTrackPatch(patch);
+      return mutate(async () => {
+        const books = await loadBooks();
+        const existing = books[canonicalUrl];
+        if (existing) {
+          return clone(existing);
+        }
+        const timestamp = currentTimestamp(now);
+        const created = createInitialRecord(timestamp, validPatch);
+        books[canonicalUrl] = created;
+        await storageArea.set({ [BOOKS_KEY]: books });
+        return clone(created);
+      });
+    },
+
     async upsertBook(fileUrl, patch) {
       const canonicalUrl = canonicalFileUrl(fileUrl);
       const validPatch = validateUpsertPatch(patch);
@@ -296,16 +336,7 @@ export function createBooksStorage({
         const existing = books[canonicalUrl];
         const updated = existing
           ? { ...existing, ...validPatch }
-          : {
-              title: "",
-              customTitle: null,
-              totalPages: 0,
-              currentPage: 1,
-              scrollTop: 0,
-              addedAt: timestamp,
-              lastReadAt: timestamp,
-              ...validPatch,
-            };
+          : createInitialRecord(timestamp, validPatch);
         if (Object.hasOwn(validPatch, "totalPages")) {
           validatePageRange(updated);
         }
@@ -382,6 +413,10 @@ function defaultStorage() {
 
 export async function getBook(fileUrl) {
   return defaultStorage().getBook(fileUrl);
+}
+
+export async function trackBook(fileUrl, patch) {
+  return defaultStorage().trackBook(fileUrl, patch);
 }
 
 export async function upsertBook(fileUrl, patch) {

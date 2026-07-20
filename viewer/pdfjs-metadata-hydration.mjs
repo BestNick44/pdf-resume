@@ -1,4 +1,4 @@
-import { resolveAutomaticBookTitle } from "./book-metadata.mjs";
+import { resolveAutomaticBookTitle } from "../shared/book-title.mjs";
 import { waitForPdfJsInitialization } from "./pdfjs-initialization.mjs";
 
 export function createPdfJsMetadataHydration({

@@ -108,7 +108,7 @@ test("every manifest entry point is a packaged file", async () => {
   await assertFileExists(manifest.action.default_popup);
 });
 
-test("popup shell is accessible and does not promise tracking yet", async () => {
+test("popup shell exposes accessible opt-in, pending, and error surfaces", async () => {
   const manifest = await readManifest();
   const popup = await readFile(
     resolveExtensionPath(manifest.action.default_popup),
@@ -116,11 +116,12 @@ test("popup shell is accessible and does not promise tracking yet", async () => 
   );
 
   assert.match(popup, /<html\s+lang="en">/i);
-  assert.match(popup, /<main[\s>]/i);
+  assert.match(popup, /<main[^>]+id="popupMain"[^>]+aria-busy="true"/i);
   assert.match(popup, /<h1[^>]*>\s*pdf-resume\s*<\/h1>/i);
-  assert.match(popup, /pdf-resume is ready/i);
-  assert.match(popup, /tracking controls (?:will arrive|are coming|arrive) in a later milestone/i);
-  assert.doesNotMatch(popup, /tracking (?:is )?(?:active|enabled|ready|working)/i);
+  assert.match(popup, /id="popupStatus"[^>]+role="status"[^>]+aria-live="polite"/i);
+  assert.match(popup, /id="popupError"[^>]+role="alert"[^>]+hidden/i);
+  assert.match(popup, /<button[^>]+id="trackButton"[^>]+type="button"[^>]+hidden/i);
+  assert.match(popup, />\s*Track this book\s*<\/button>/i);
 });
 
 test("popup resources are packaged and comply with extension-page CSP", async () => {
@@ -172,7 +173,18 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   const viewerApp = await readFile(resolveExtensionPath("viewer/viewer-app.mjs"), "utf8");
 
   assert.match(popup, /<script src="popup-entry\.mjs" type="module"><\/script>/i);
-  assert.equal(popupEntry.trim(), 'import "../storage/books.mjs";');
+  assert.match(
+    popupEntry,
+    /import \{ getBook, trackBook \} from "\.\.\/storage\/books\.mjs";/,
+  );
+  assert.match(popupEntry, /import \{ createPopupApp \} from "\.\/popup-app\.mjs";/);
+  assert.match(popupEntry, /import \{ createPopupView \} from "\.\/popup-view\.mjs";/);
+  assert.match(popupEntry, /tabs\.query\(query\)/);
+  assert.match(popupEntry, /tabs\.get\(tabId\)/);
+  assert.match(popupEntry, /tabs\.update\(tabId, updateProperties\)/);
+  assert.match(popupEntry, /runtime\.getURL\(path\)/);
+  await assertFileExists("popup/popup-app.mjs");
+  await assertFileExists("popup/popup-view.mjs");
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
   assert.match(viewerEntry, /^import \{ startViewerApp \} from "\.\/viewer-app\.mjs";/);
   assert.match(
@@ -250,6 +262,7 @@ test("shared storage module exposes its API without resolving extension globals 
     [
       "getBook",
       "hydrateMetadata",
+      "trackBook",
       "upsertBook",
       "removeBook",
       "listBooks",
@@ -671,7 +684,7 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer/viewer.css",
     "viewer/viewer-entry.mjs",
     "viewer/viewer-app.mjs",
-    "viewer/book-metadata.mjs",
+    "shared/book-title.mjs",
     "viewer/pdfjs-initialization.mjs",
     "viewer/pdfjs-metadata-hydration.mjs",
     "viewer/pdfjs-position-restore.mjs",

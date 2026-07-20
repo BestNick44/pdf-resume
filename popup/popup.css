@@ -20,6 +20,12 @@ h1 {
   font-size: 1.25rem;
 }
 
+h2 {
+  margin: 0.75rem 0 0;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+}
+
 p {
   margin: 0.5rem 0 0;
   line-height: 1.5;
@@ -27,4 +33,27 @@ p {
 
 .status {
   font-weight: 650;
+}
+
+button {
+  margin-top: 1rem;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.875rem;
+  border: 1px solid ButtonBorder;
+  border-radius: 0.35rem;
+  background: ButtonFace;
+  color: ButtonText;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+button:focus-visible {
+  outline: 0.2rem solid Highlight;
+  outline-offset: 0.15rem;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
