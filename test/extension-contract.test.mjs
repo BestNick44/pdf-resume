@@ -181,39 +181,235 @@ test("viewer rejects absent, malformed, extra, remote, and non-PDF inputs", asyn
   }
 });
 
-test("viewer boot keeps local input out of markup and passes only a blob URL to PDF.js", async () => {
+test("viewer shell is accessible and keeps local input out of markup", async () => {
   const viewer = await readFile(resolveExtensionPath("viewer.html"), "utf8");
-  const entry = await readFile(resolveExtensionPath("viewer/viewer-entry.mjs"), "utf8");
-  const { buildPdfJsViewerUrl } = await import("../viewer/viewer-url.mjs");
-  const viewerUrl = buildPdfJsViewerUrl(
-    "blob:chrome-extension://abcdefghijkl/document-id",
-    new URL("file:///tmp/My%20Book.pdf"),
-    new URL("chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html"),
-  );
 
   assert.match(viewer, /<html\s+lang="en">/i);
   assert.match(viewer, /<main[^>]+id="viewerError"[^>]+role="alert"[^>]+hidden/i);
   assert.match(viewer, /<iframe[^>]+id="pdfViewer"[^>]+title="PDF viewer"[^>]+hidden/i);
   assert.match(viewer, /src="viewer\/viewer-entry\.mjs"/i);
   assert.doesNotMatch(viewer, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
-  assert.doesNotMatch(entry, /innerHTML|insertAdjacentHTML|document\.write/);
-  assert.match(entry, /fetch\(fileUrl\.href/);
-  assert.match(entry, /const pdfBlob = await response\.blob\(\);/);
-  assert.match(
-    entry,
-    /const signatureBytes = await pdfBlob\.slice\(0, 1024\)\.arrayBuffer\(\);/,
-  );
-  assert.match(entry, /new TextDecoder\("ascii"\)\.decode\(signatureBytes\)/);
-  assert.match(entry, /URL\.createObjectURL\(pdfBlob\)/);
-  assert.doesNotMatch(entry, /response\.arrayBuffer\(\)|new Blob\s*\(/);
-  assert.match(entry, /frame\.src = buildPdfJsViewerUrl/);
-  assert.equal(viewerUrl.origin, "null");
-  assert.equal(viewerUrl.pathname, "/viewer/pdfjs/web/viewer.html");
+});
+
+test("viewer boot displays a valid local PDF through the packaged PDF.js viewer", async () => {
+  const { bootViewer } = await import("../viewer/viewer-boot.mjs");
+  const { createViewerView } = await import("../viewer/viewer-view.mjs");
+  const pdfBlob = new Blob(["ignored prefix\n%PDF-1.7\n"]);
+  const fetchCalls = [];
+  const objectUrlBlobs = [];
+  let loadListener;
+  let loadOptions;
+  let focusCalls = 0;
+  const frame = {
+    hidden: true,
+    src: "",
+    addEventListener(type, listener, options) {
+      assert.equal(type, "load");
+      loadListener = listener;
+      loadOptions = options;
+    },
+    focus() {
+      focusCalls += 1;
+    },
+  };
+  const errorPanel = { hidden: true };
+  const errorMessage = { textContent: "" };
+  const objectUrl = "blob:chrome-extension://abcdefghijkl/document-id";
+  const search = `?file=${encodeURIComponent("file:///tmp/My Book.pdf")}`;
+
+  const result = await bootViewer({
+    search,
+    fetchPdf: async (...args) => {
+      fetchCalls.push(args);
+      return { ok: true, blob: async () => pdfBlob };
+    },
+    createObjectUrl(blob) {
+      objectUrlBlobs.push(blob);
+      return objectUrl;
+    },
+    pdfJsViewerUrl: new URL(
+      "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+    ),
+    view: createViewerView({ frame, errorPanel, errorMessage }),
+  });
+
+  assert.equal(result, objectUrl);
+  assert.deepEqual(fetchCalls, [
+    [
+      "file:///tmp/My%20Book.pdf",
+      { cache: "no-store", credentials: "omit", redirect: "error" },
+    ],
+  ]);
+  assert.equal(objectUrlBlobs.length, 1);
+  assert.equal(objectUrlBlobs[0], pdfBlob);
+  assert.equal(frame.hidden, false);
+  assert.equal(errorPanel.hidden, true);
+  assert.equal(errorMessage.textContent, "");
+  const displayedUrl = new URL(frame.src);
+  assert.equal(displayedUrl.protocol, "chrome-extension:");
+  assert.equal(displayedUrl.hostname, "abcdefghijkl");
+  assert.equal(displayedUrl.pathname, "/viewer/pdfjs/web/viewer.html");
   assert.equal(
-    viewerUrl.searchParams.get("file"),
-    "blob:chrome-extension://abcdefghijkl/document-id#My%20Book.pdf",
+    displayedUrl.searchParams.get("file"),
+    `${objectUrl}#My%20Book.pdf`,
   );
-  assert.doesNotMatch(viewerUrl.href, /file:/);
+  assert.doesNotMatch(displayedUrl.href, /file:/);
+  assert.deepEqual(loadOptions, { once: true });
+  assert.equal(focusCalls, 0);
+  loadListener();
+  assert.equal(focusCalls, 1);
+});
+
+test("viewer boot presents local input errors without creating or showing a viewer", async (t) => {
+  const { bootViewer } = await import("../viewer/viewer-boot.mjs");
+  const { createViewerView } = await import("../viewer/viewer-view.mjs");
+  const invalidInputs = [
+    ["missing", ""],
+    ["malformed", "?file=file:///tmp/book.pdf"],
+    ["remote", `?file=${encodeURIComponent("https://example.test/book.pdf")}`],
+    ["non-PDF", `?file=${encodeURIComponent("file:///tmp/book.txt")}`],
+  ];
+
+  for (const [name, search] of invalidInputs) {
+    await t.test(name, async () => {
+      const frame = {
+        hidden: true,
+        src: "",
+        addEventListener() {
+          assert.fail("an invalid input must not register a viewer load handler");
+        },
+      };
+      const errorPanel = { hidden: true };
+      const errorMessage = { textContent: "" };
+      let objectUrlCalls = 0;
+
+      const result = await bootViewer({
+        search,
+        fetchPdf: async () => assert.fail("an invalid input must not be fetched"),
+        createObjectUrl() {
+          objectUrlCalls += 1;
+        },
+        pdfJsViewerUrl: new URL(
+          "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+        ),
+        view: createViewerView({ frame, errorPanel, errorMessage }),
+      });
+
+      assert.equal(result, undefined);
+      assert.equal(objectUrlCalls, 0);
+      assert.equal(frame.hidden, true);
+      assert.equal(frame.src, "");
+      assert.equal(errorPanel.hidden, false);
+      assert.equal(
+        errorMessage.textContent,
+        "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.",
+      );
+    });
+  }
+});
+
+test("viewer boot rejects bad signatures and presents local read failures", async (t) => {
+  const { bootViewer } = await import("../viewer/viewer-boot.mjs");
+  const { createViewerView } = await import("../viewer/viewer-view.mjs");
+  const inputError =
+    "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.";
+  const readError =
+    "The local PDF could not be read. Enable “Allow access to file URLs” for pdf-resume and verify that the file still exists.";
+  const cases = [
+    {
+      name: "bad PDF signature",
+      fetchPdf: async () => ({ ok: true, blob: async () => new Blob(["not a PDF"]) }),
+      message: inputError,
+    },
+    {
+      name: "rejected file request",
+      fetchPdf: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+      message: readError,
+    },
+    {
+      name: "unsuccessful file response",
+      fetchPdf: async () => ({ ok: false, status: 404 }),
+      message: readError,
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const frame = {
+        hidden: true,
+        src: "",
+        addEventListener() {
+          assert.fail("a rejected file must not register a viewer load handler");
+        },
+      };
+      const errorPanel = { hidden: true };
+      const errorMessage = { textContent: "" };
+      let objectUrlCalls = 0;
+
+      const result = await bootViewer({
+        search: `?file=${encodeURIComponent("file:///tmp/book.pdf")}`,
+        fetchPdf: testCase.fetchPdf,
+        createObjectUrl() {
+          objectUrlCalls += 1;
+        },
+        pdfJsViewerUrl: new URL(
+          "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+        ),
+        view: createViewerView({ frame, errorPanel, errorMessage }),
+      });
+
+      assert.equal(result, undefined);
+      assert.equal(objectUrlCalls, 0);
+      assert.equal(frame.hidden, true);
+      assert.equal(frame.src, "");
+      assert.equal(errorPanel.hidden, false);
+      assert.equal(errorMessage.textContent, testCase.message);
+    });
+  }
+});
+
+test("viewer view adapter switches between focused viewer and accessible error states", async () => {
+  const { createViewerView } = await import("../viewer/viewer-view.mjs");
+  let loadListener;
+  let loadOptions;
+  let focusCalls = 0;
+  const frame = {
+    hidden: false,
+    src: "chrome-extension://abcdefghijkl/old-viewer.html",
+    addEventListener(type, listener, options) {
+      assert.equal(type, "load");
+      loadListener = listener;
+      loadOptions = options;
+    },
+    focus() {
+      focusCalls += 1;
+    },
+  };
+  const errorPanel = { hidden: true };
+  const errorMessage = { textContent: "" };
+  const view = createViewerView({ frame, errorPanel, errorMessage });
+
+  view.showError("A local error occurred.");
+
+  assert.equal(frame.hidden, true);
+  assert.equal(errorPanel.hidden, false);
+  assert.equal(errorMessage.textContent, "A local error occurred.");
+
+  const viewerUrl = new URL(
+    "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html?file=blob%3Atest",
+  );
+  view.showViewer(viewerUrl);
+
+  assert.equal(frame.hidden, false);
+  assert.equal(frame.src, viewerUrl.href);
+  assert.equal(errorPanel.hidden, true);
+  assert.equal(errorMessage.textContent, "");
+  assert.deepEqual(loadOptions, { once: true });
+  assert.equal(focusCalls, 0);
+  loadListener();
+  assert.equal(focusCalls, 1);
 });
 
 test("official PDF.js distribution is pinned and byte-for-byte inventoried", async () => {
@@ -334,7 +530,14 @@ test("PDF.js runtime and worker resources resolve through exact packaged paths",
 
 test("viewer resources stay packaged and MV3 CSP permits only required local loading", async () => {
   const manifest = await readManifest();
-  const appFiles = ["viewer.html", "viewer/viewer.css", "viewer/viewer-entry.mjs"];
+  const appFiles = [
+    "viewer.html",
+    "viewer/viewer.css",
+    "viewer/viewer-entry.mjs",
+    "viewer/viewer-boot.mjs",
+    "viewer/viewer-url.mjs",
+    "viewer/viewer-view.mjs",
+  ];
   const resourceAttribute = /<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"[^>]*>/gi;
 
   assert.deepEqual(manifest.content_security_policy, expectedExtensionCsp);
