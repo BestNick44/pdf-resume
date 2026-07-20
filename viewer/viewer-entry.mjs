@@ -1,3 +1,5 @@
+import "../storage/books.mjs";
+
 import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
 

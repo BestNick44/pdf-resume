@@ -1,5 +1,8 @@
+import { canonicalizeLocalPdfUrl } from "../shared/local-pdf-url.mjs";
+
 const BOOKS_KEY = "books";
 const BOOKS_LOCK = "pdf-resume:books";
+const BOOKS_LOCK_TIMEOUT_MILLISECONDS = 25_000;
 const RECORD_FIELDS = [
   "title",
   "customTitle",
@@ -36,22 +39,11 @@ function canonicalFileUrl(value) {
     throw new TypeError("book URL must be a string");
   }
 
-  let url;
   try {
-    url = new URL(value);
+    return canonicalizeLocalPdfUrl(value).href;
   } catch {
     throw new TypeError("book URL must be a valid local file:// PDF URL");
   }
-
-  if (
-    url.protocol !== "file:" ||
-    url.hostname !== "" ||
-    !url.pathname.toLowerCase().endsWith(".pdf")
-  ) {
-    throw new TypeError("book URL must be a valid local file:// PDF URL");
-  }
-
-  return url.href;
 }
 
 function ownDataEntries(value, allowedFields, label) {
@@ -231,12 +223,16 @@ export function createBooksStorage({
   storageArea,
   lockManager,
   now = () => Math.floor(Date.now() / 1000),
+  createLockTimeoutSignal = (milliseconds) => AbortSignal.timeout(milliseconds),
 } = {}) {
   if (!storageArea || typeof storageArea.get !== "function" || typeof storageArea.set !== "function") {
     throw new TypeError("a chrome.storage.local-compatible storage area is required");
   }
   if (typeof now !== "function") {
     throw new TypeError("now must be a function");
+  }
+  if (typeof createLockTimeoutSignal !== "function") {
+    throw new TypeError("createLockTimeoutSignal must be a function");
   }
 
   async function loadBooks() {
@@ -247,7 +243,8 @@ export function createBooksStorage({
     if (!lockManager || typeof lockManager.request !== "function") {
       throw new Error("book mutations require the cross-context Web Locks API");
     }
-    return lockManager.request(BOOKS_LOCK, operation);
+    const signal = createLockTimeoutSignal(BOOKS_LOCK_TIMEOUT_MILLISECONDS);
+    return lockManager.request(BOOKS_LOCK, { signal }, operation);
   }
 
   return Object.freeze({
@@ -260,7 +257,7 @@ export function createBooksStorage({
     async listBooks() {
       const books = await loadBooks();
       return Object.keys(books)
-        .sort((left, right) => left.localeCompare(right))
+        .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
         .map((fileUrl) => ({ fileUrl, book: clone(books[fileUrl]) }));
     },
 

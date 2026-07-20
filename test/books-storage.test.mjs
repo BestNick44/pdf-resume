@@ -13,6 +13,8 @@ import { createChromeStorageFake } from "./support/chrome-storage-fake.mjs";
 
 const BOOK_A = "file:///Users/reader/Books/A%20Book.pdf";
 const BOOK_B = "file:///Users/reader/Books/B.pdf";
+const BOOK_LOWERCASE = "file:///Users/reader/Books/a.pdf";
+const BOOK_UPPERCASE = "file:///Users/reader/Books/Z.pdf";
 
 function canonicalRecord(overrides = {}) {
   return {
@@ -27,11 +29,12 @@ function canonicalRecord(overrides = {}) {
   };
 }
 
-function storeWith(fake, now = 1_800_000_000) {
+function createTestBooksStorage(fake, now = 1_800_000_000, dependencies = {}) {
   return createBooksStorage({
     storageArea: fake.local,
     lockManager: fake.locks,
     now: () => now,
+    ...dependencies,
   });
 }
 
@@ -63,7 +66,7 @@ function setProductionGlobals(fake) {
 
 test("absent books storage reads as an empty library", async () => {
   const fake = createChromeStorageFake();
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   assert.equal(await books.getBook(BOOK_A), undefined);
   assert.deepEqual(await books.listBooks(), []);
@@ -72,7 +75,7 @@ test("absent books storage reads as an empty library", async () => {
 
 test("upsert creates a canonical record with documented defaults and timestamps", async () => {
   const fake = createChromeStorageFake();
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   const created = await books.upsertBook("file:///Users/reader/Books/A Book.pdf", {
     title: "A Book",
@@ -92,10 +95,21 @@ test("upsert creates a canonical record with documented defaults and timestamps"
   });
 });
 
+test("encoded PDF extensions are accepted while the canonical full href remains the key", async () => {
+  const fake = createChromeStorageFake();
+  const books = createTestBooksStorage(fake);
+  const encodedUrl = "file:///Users/reader/Books/Encoded%2Epdf?edition=1#page=2";
+
+  const created = await books.upsertBook(encodedUrl, { title: "Encoded" });
+
+  assert.deepEqual(fake.snapshot(), { books: { [encodedUrl]: created } });
+  assert.deepEqual(await books.getBook(encodedUrl), created);
+});
+
 test("upsert applies only supplied fields and preserves unrelated newer data", async () => {
   const existing = canonicalRecord({ customTitle: "My favorite", lastReadAt: 1_900_000_000 });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   const updated = await books.upsertBook(BOOK_A, {
     title: "Metadata title",
@@ -113,7 +127,7 @@ test("upsert applies only supplied fields and preserves unrelated newer data", a
 test("upsert validates the complete resulting page range before writing", async () => {
   const existing = canonicalRecord({ currentPage: 200, totalPages: 300 });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   await assert.rejects(() => books.upsertBook(BOOK_A, { totalPages: 100 }), /currentPage/i);
   assert.deepEqual(fake.snapshot().books[BOOK_A], existing);
@@ -123,7 +137,7 @@ test("upsert validates the complete resulting page range before writing", async 
 test("position updates preserve metadata and only advance position and last-read fields", async () => {
   const existing = canonicalRecord({ customTitle: "Keep this title" });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   const updated = await books.updatePosition(BOOK_A, {
     currentPage: 13,
@@ -145,7 +159,7 @@ test("position updates preserve metadata and only advance position and last-read
 test("position updates can patch one position field and keep timestamps monotonic", async () => {
   const existing = canonicalRecord({ lastReadAt: 1_900_000_000 });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
-  const books = storeWith(fake, 1_800_000_000);
+  const books = createTestBooksStorage(fake, 1_800_000_000);
 
   const updated = await books.updatePosition(BOOK_A, { scrollTop: 0 });
 
@@ -154,28 +168,31 @@ test("position updates can patch one position field and keep timestamps monotoni
 
 test("position update for an untracked book is a no-op", async () => {
   const fake = createChromeStorageFake({ books: { [BOOK_B]: canonicalRecord() } });
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   assert.equal(await books.updatePosition(BOOK_A, { currentPage: 2 }), undefined);
   assert.deepEqual(fake.snapshot(), { books: { [BOOK_B]: canonicalRecord() } });
   assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
 });
 
-test("get and list return canonical records in URL order", async () => {
+test("get and list return canonical records in code-unit URL order", async () => {
   const recordA = canonicalRecord({ title: "A" });
-  const recordB = canonicalRecord({ title: "B" });
+  const recordLowercase = canonicalRecord({ title: "lowercase" });
+  const recordUppercase = canonicalRecord({ title: "uppercase" });
   const fake = createChromeStorageFake({
     books: {
-      [BOOK_B]: recordB,
+      [BOOK_LOWERCASE]: recordLowercase,
       [BOOK_A]: recordA,
+      [BOOK_UPPERCASE]: recordUppercase,
     },
   });
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   assert.deepEqual(await books.getBook(BOOK_A), recordA);
   assert.deepEqual(await books.listBooks(), [
     { fileUrl: BOOK_A, book: recordA },
-    { fileUrl: BOOK_B, book: recordB },
+    { fileUrl: BOOK_UPPERCASE, book: recordUppercase },
+    { fileUrl: BOOK_LOWERCASE, book: recordLowercase },
   ]);
 });
 
@@ -184,7 +201,7 @@ test("remove deletes an existing record and missing removes are no-ops", async (
   const fake = createChromeStorageFake({
     books: { [BOOK_A]: canonicalRecord(), [BOOK_B]: recordB },
   });
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   assert.equal(await books.removeBook(BOOK_A), true);
   assert.deepEqual(fake.snapshot(), { books: { [BOOK_B]: recordB } });
@@ -199,7 +216,7 @@ test("remove deletes an existing record and missing removes are no-ops", async (
 test("public results never alias persisted or caller-owned objects", async () => {
   const initial = canonicalRecord();
   const fake = createChromeStorageFake({ books: { [BOOK_A]: initial } });
-  const books = storeWith(fake);
+  const books = createTestBooksStorage(fake);
 
   const read = await books.getBook(BOOK_A);
   read.title = "Mutated read";
@@ -242,6 +259,8 @@ test("invalid URLs and patch values are rejected before storage access", async (
     ["malformed URL", "not a URL", { title: "Book" }],
     ["remote URL", "https://example.test/book.pdf", { title: "Book" }],
     ["non-PDF URL", "file:///tmp/book.txt", { title: "Book" }],
+    ["malformed pathname escape", "file:///tmp/book%ZZ.pdf", { title: "Book" }],
+    ["NUL in pathname", "file:///tmp/book%00.pdf", { title: "Book" }],
     ["remote file authority", "file://server/share/book.pdf", { title: "Book" }],
     ["empty patch", BOOK_A, {}],
     ["array patch", BOOK_A, []],
@@ -261,7 +280,7 @@ test("invalid URLs and patch values are rejected before storage access", async (
   for (const [name, fileUrl, patch] of cases) {
     await t.test(name, async () => {
       const fake = createChromeStorageFake();
-      await assert.rejects(() => storeWith(fake).upsertBook(fileUrl, patch));
+      await assert.rejects(() => createTestBooksStorage(fake).upsertBook(fileUrl, patch));
       assert.deepEqual(fake.operations, []);
       assert.deepEqual(fake.snapshot(), {});
     });
@@ -283,7 +302,7 @@ test("position patches reject invalid shapes before storage access", async () =>
 
   for (const patch of invalidPatches) {
     const fake = createChromeStorageFake();
-    await assert.rejects(() => storeWith(fake).updatePosition(BOOK_A, patch));
+    await assert.rejects(() => createTestBooksStorage(fake).updatePosition(BOOK_A, patch));
     assert.deepEqual(fake.operations, []);
   }
 });
@@ -302,7 +321,10 @@ test("malformed persisted books state is reported and never rewritten", async (t
     ["bad custom title", { [BOOK_A]: canonicalRecord({ customTitle: undefined }) }],
     ["bad total pages", { [BOOK_A]: canonicalRecord({ totalPages: -1 }) }],
     ["page beyond total", { [BOOK_A]: canonicalRecord({ currentPage: 301 }) }],
-    ["bad scroll", { [BOOK_A]: canonicalRecord({ scrollTop: Number.NaN }) }],
+    [
+      "non-finite scroll omitted during Chrome serialization",
+      { [BOOK_A]: canonicalRecord({ scrollTop: Number.NaN }) },
+    ],
     ["bad added timestamp", { [BOOK_A]: canonicalRecord({ addedAt: -1 }) }],
     ["bad last-read timestamp", { [BOOK_A]: canonicalRecord({ lastReadAt: 1.5 }) }],
   ];
@@ -310,7 +332,7 @@ test("malformed persisted books state is reported and never rewritten", async (t
   for (const [name, booksState] of malformedStates) {
     await t.test(name, async () => {
       const fake = createChromeStorageFake({ books: booksState });
-      const books = storeWith(fake);
+      const books = createTestBooksStorage(fake);
       await assert.rejects(() => books.listBooks(), /stored books/i);
       await assert.rejects(() => books.upsertBook(BOOK_B, { title: "B" }), /stored books/i);
       assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
@@ -321,16 +343,47 @@ test("malformed persisted books state is reported and never rewritten", async (t
 test("storage read and write failures propagate without false success", async () => {
   const readFake = createChromeStorageFake();
   readFake.failNext("get", new Error("read denied"));
-  await assert.rejects(() => storeWith(readFake).listBooks(), /read denied/);
+  await assert.rejects(() => createTestBooksStorage(readFake).listBooks(), /read denied/);
 
   const existing = canonicalRecord();
   const writeFake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
   writeFake.failNext("set", new Error("quota exceeded"));
   await assert.rejects(
-    () => storeWith(writeFake).upsertBook(BOOK_A, { title: "Not saved" }),
+    () => createTestBooksStorage(writeFake).upsertBook(BOOK_A, { title: "Not saved" }),
     /quota exceeded/,
   );
   assert.deepEqual(writeFake.snapshot().books[BOOK_A], existing);
+});
+
+test("Chrome storage fake serializes unsupported values instead of structured-cloning them", async () => {
+  const fake = createChromeStorageFake({ retained: "existing" });
+  const payload = {
+    keep: 1,
+    undefinedValue: undefined,
+    nan: Number.NaN,
+    infinity: Number.POSITIVE_INFINITY,
+    functionValue() {},
+    bigintValue: 1n,
+    map: new Map([["ignored", true]]),
+    values: [undefined, Number.NaN, Number.NEGATIVE_INFINITY, () => {}, new Set([1])],
+  };
+
+  const write = fake.local.set({
+    retained: undefined,
+    omitted: Number.NaN,
+    payload,
+  });
+  payload.keep = 2;
+  await write;
+
+  assert.deepEqual(fake.snapshot(), {
+    retained: "existing",
+    payload: {
+      keep: 1,
+      map: {},
+      values: [null, null, null, null, {}],
+    },
+  });
 });
 
 test("Chrome storage fake supports callbacks, promises, copy semantics, and runtime errors", async () => {
@@ -355,8 +408,8 @@ test("Chrome storage fake supports callbacks, promises, copy semantics, and runt
 
 test("cross-context lock preserves simultaneous updates to distinct books", async () => {
   const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
-  const viewerStore = storeWith(fake, 1_800_000_001);
-  const popupStore = storeWith(fake, 1_800_000_002);
+  const viewerStore = createTestBooksStorage(fake, 1_800_000_001);
+  const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldRead = fake.holdNext("get", { after: true });
 
   const viewerWrite = viewerStore.updatePosition(BOOK_A, { currentPage: 20 });
@@ -379,8 +432,8 @@ test("cross-context lock preserves simultaneous updates to distinct books", asyn
 test("cross-context lock preserves simultaneous partial updates to the same book", async () => {
   const existing = canonicalRecord({ customTitle: null });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
-  const viewerStore = storeWith(fake, 1_800_000_001);
-  const popupStore = storeWith(fake, 1_800_000_002);
+  const viewerStore = createTestBooksStorage(fake, 1_800_000_001);
+  const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldWrite = fake.holdNext("set");
 
   const viewerWrite = viewerStore.updatePosition(BOOK_A, { currentPage: 20 });
@@ -395,6 +448,37 @@ test("cross-context lock preserves simultaneous partial updates to the same book
     currentPage: 20,
     lastReadAt: 1_800_000_001,
   });
+});
+
+test("unavailable locks reject on the bounded deadline without touching storage", async () => {
+  const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
+  const heldRead = fake.holdNext("get", { after: true });
+  const holderWrite = createTestBooksStorage(fake).updatePosition(BOOK_A, { currentPage: 20 });
+  await heldRead.started;
+
+  const timeout = new AbortController();
+  let timeoutMilliseconds;
+  const waitingStore = createTestBooksStorage(fake, 1_800_000_001, {
+    createLockTimeoutSignal(milliseconds) {
+      timeoutMilliseconds = milliseconds;
+      return timeout.signal;
+    },
+  });
+  const waitingWrite = waitingStore.upsertBook(BOOK_B, { title: "B" });
+  const rejectedWrite = assert.rejects(waitingWrite, { name: "TimeoutError" });
+  timeout.abort(new DOMException("book storage lock acquisition timed out", "TimeoutError"));
+  await rejectedWrite;
+
+  assert.equal(timeoutMilliseconds, 25_000);
+  assert.equal(
+    fake.operations.filter(({ method, phase }) => method === "get" && phase === "start").length,
+    1,
+  );
+  assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
+
+  heldRead.release();
+  await holderWrite;
+  assert.equal(Object.hasOwn(fake.snapshot().books, BOOK_B), false);
 });
 
 test("mutations require a cross-context lock rather than claiming storage atomicity", async () => {

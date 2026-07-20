@@ -1,5 +1,67 @@
+const OMITTED = Symbol("omitted Chrome storage value");
+
+function serialize(value, ancestors = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : OMITTED;
+  }
+  if (typeof value !== "object") {
+    return OMITTED;
+  }
+  if (ancestors.has(value)) {
+    return null;
+  }
+
+  ancestors.add(value);
+  let serialized;
+  if (Array.isArray(value)) {
+    serialized = Array.from(value, (item) => {
+      const serializedItem = serialize(item, ancestors);
+      return serializedItem === OMITTED ? null : serializedItem;
+    });
+  } else {
+    serialized = {};
+    let keys;
+    try {
+      keys = Object.keys(value);
+    } catch {
+      keys = [];
+    }
+    for (const key of keys) {
+      let item;
+      try {
+        item = value[key];
+      } catch {
+        continue;
+      }
+      const serializedItem = serialize(item, ancestors);
+      if (serializedItem !== OMITTED) {
+        Object.defineProperty(serialized, key, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: serializedItem,
+        });
+      }
+    }
+  }
+  ancestors.delete(value);
+  return serialized;
+}
+
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+  const serialized = serialize(value);
+  return serialized === OMITTED ? undefined : serialized;
+}
+
+function serializeItems(value) {
+  const serialized = serialize(value);
+  if (serialized === OMITTED || serialized === null || Array.isArray(serialized)) {
+    throw new TypeError("storage items must be an object");
+  }
+  return serialized;
 }
 
 function select(data, keys) {
@@ -30,7 +92,7 @@ function select(data, keys) {
 }
 
 export function createChromeStorageFake(initial = {}) {
-  let data = clone(initial);
+  let data = serializeItems(initial);
   const failures = new Map();
   const holds = new Map();
   const operations = [];
@@ -85,29 +147,16 @@ export function createChromeStorageFake(initial = {}) {
       return invoke("get", args, () => select(data, args[0]));
     },
     set(...args) {
+      const items = serializeItems(args[0]);
       return invoke("set", args, () => {
-        const items = args[0];
         for (const key of Object.keys(items)) {
           Object.defineProperty(data, key, {
             configurable: true,
             enumerable: true,
             writable: true,
-            value: clone(items[key]),
+            value: items[key],
           });
         }
-      });
-    },
-    remove(...args) {
-      return invoke("remove", args, () => {
-        const keys = Array.isArray(args[0]) ? args[0] : [args[0]];
-        for (const key of keys) {
-          delete data[key];
-        }
-      });
-    },
-    clear(...args) {
-      return invoke("clear", args, () => {
-        data = {};
       });
     },
   };
@@ -143,21 +192,69 @@ export function createChromeStorageFake(initial = {}) {
 }
 
 export function createLockManagerFake() {
-  const tails = new Map();
+  const lockStates = new Map();
+
+  function processQueue(name, state) {
+    if (state.active) {
+      return;
+    }
+
+    const entry = state.queue.shift();
+    if (!entry) {
+      lockStates.delete(name);
+      return;
+    }
+
+    state.active = true;
+    entry.started = true;
+    entry.signal?.removeEventListener("abort", entry.abort);
+    Promise.resolve()
+      .then(() => entry.callback({ name, mode: "exclusive" }))
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        state.active = false;
+        processQueue(name, state);
+      });
+  }
 
   return {
-    request(name, callback) {
-      const previous = tails.get(name) ?? Promise.resolve();
-      const result = previous.catch(() => {}).then(() => callback({ name, mode: "exclusive" }));
-      const tail = result
-        .catch(() => {})
-        .finally(() => {
-          if (tails.get(name) === tail) {
-            tails.delete(name);
-          }
-        });
-      tails.set(name, tail);
-      return result;
+    request(name, options, callback) {
+      if (typeof options === "function") {
+        callback = options;
+        options = {};
+      }
+
+      const signal = options?.signal;
+      return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+
+        const state = lockStates.get(name) ?? { active: false, queue: [] };
+        lockStates.set(name, state);
+        const entry = {
+          callback,
+          resolve,
+          reject,
+          signal,
+          started: false,
+          abort() {
+            if (entry.started) {
+              return;
+            }
+            const index = state.queue.indexOf(entry);
+            if (index !== -1) {
+              state.queue.splice(index, 1);
+            }
+            reject(signal.reason);
+            processQueue(name, state);
+          },
+        };
+        signal?.addEventListener("abort", entry.abort, { once: true });
+        state.queue.push(entry);
+        processQueue(name, state);
+      });
     },
   };
 }
