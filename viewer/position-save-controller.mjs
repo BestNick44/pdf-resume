@@ -184,6 +184,13 @@ export function createPositionSaveController({
   }
 
   return Object.freeze({
+    needsSave(position) {
+      if (destroyed || disabled) {
+        return false;
+      }
+      return !samePosition(validatePosition(position), savedPosition);
+    },
+
     observe(position) {
       if (destroyed || disabled) {
         return;

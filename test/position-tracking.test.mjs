@@ -138,26 +138,38 @@ function createPdfJsHarness({
   getBook = async () => canonicalRecord(),
   handoffPosition = () => {},
   initialReadRetryDelays,
+  reportError,
+  restorePosition,
   updatePosition,
 } = {}) {
   const time = createFakeScheduler();
   const hostDocument = new FakeEventTarget();
   hostDocument.visibilityState = "visible";
   const container = new FakeEventTarget();
+  container.clientHeight = 600;
+  container.scrollHeight = 4_000;
   container.scrollTop = 0;
   const eventBus = new FakeEventBus();
   const initialized = deferred();
-  const firstDocument = { id: "first" };
+  const firstDocument = { id: "first", numPages: 20 };
+  const pageViews = Array.from({ length: 20 }, () => ({ renderingState: 0 }));
   const application = {
     appConfig: { mainContainer: container },
     eventBus,
     initializedPromise: initialized.promise,
     pdfDocument: null,
-    pdfViewer: { currentPageNumber: 1, pagesCount: 0 },
+    pdfViewer: {
+      currentPageNumber: 1,
+      getPageView(index) {
+        return pageViews[index];
+      },
+      pagesCount: 0,
+    },
   };
   const frame = new FakeEventTarget();
   frame.contentWindow = { PDFViewerApplication: application };
   const calls = [];
+  const errors = [];
   const tracking = createPdfJsPositionTracking({
     fileUrl: BOOK_URL,
     frame,
@@ -165,6 +177,8 @@ function createPdfJsHarness({
     getBook,
     handoffPosition,
     initialReadRetryDelays,
+    reportError: reportError ?? ((error) => errors.push(error)),
+    restorePosition,
     updatePosition:
       updatePosition ??
       (async (fileUrl, position) => {
@@ -175,22 +189,37 @@ function createPdfJsHarness({
     clock: time.clock,
   });
 
+  async function finishRestore(pageNumber = application.pdfViewer.currentPageNumber) {
+    pageViews[pageNumber - 1].renderingState = 3;
+    eventBus.dispatch("pagerendered", {
+      pageNumber,
+      source: pageViews[pageNumber - 1],
+    });
+    await drainMicrotasks();
+    time.advanceBy(16);
+    await drainMicrotasks();
+    time.advanceBy(16);
+    await drainMicrotasks();
+  }
+
   async function ready(documentIdentity = firstDocument) {
     frame.dispatch("load");
     initialized.resolve();
     await Promise.resolve();
     application.pdfDocument = documentIdentity;
-    application.pdfViewer.pagesCount = 20;
+    application.pdfViewer.pagesCount = documentIdentity.numPages ?? 20;
     eventBus.dispatch("pagesinit", { source: application.pdfViewer });
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainMicrotasks();
+    await finishRestore(application.pdfViewer.currentPageNumber);
   }
 
   return {
     application,
     calls,
     container,
+    errors,
     eventBus,
+    finishRestore,
     firstDocument,
     frame,
     hostDocument,
@@ -419,8 +448,8 @@ test("PDF.js tracking waits for iframe, application, viewer, and tracked-book re
   await Promise.resolve();
   initializedApplication.pdfDocument = harness.firstDocument;
   harness.eventBus.dispatch("pagesinit", { source: initializedApplication.pdfViewer });
-  await Promise.resolve();
-  await Promise.resolve();
+  await drainMicrotasks();
+  await harness.finishRestore(1);
 
   assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
   assert.equal(harness.eventBus.listenerCount("updateviewarea"), 1);
@@ -445,6 +474,8 @@ test("a transient initial tracked-book read retries while the document remains a
   assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
   assert.equal(harness.time.pendingCount(), 1);
   harness.time.advanceBy(250);
+  await drainMicrotasks();
+  await harness.finishRestore(1);
   await harness.tracking.settled();
 
   assert.equal(reads, 2);
@@ -469,6 +500,7 @@ test("initial tracked-book retries are bounded, cancellable, and terminal for ma
     harness.time.advanceBy(200);
     await harness.tracking.settled();
     assert.equal(reads, 3);
+    assert.deepEqual(harness.errors.map((error) => error.message), ["storage unavailable"]);
     assert.equal(harness.time.pendingCount(), 0);
     assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
     harness.tracking.destroy();
@@ -504,8 +536,8 @@ test("initial tracked-book retries are bounded, cancellable, and terminal for ma
 
     await harness.ready();
     assert.equal(harness.time.pendingCount(), 1);
-    harness.application.pdfDocument = { id: "replacement" };
-    harness.eventBus.dispatch("pagesinit", { source: harness.application.pdfViewer });
+    harness.application.pdfDocument = { id: "replacement", numPages: 2 };
+    harness.eventBus.dispatch("pagesdestroy", { source: harness.application.pdfViewer });
     assert.equal(harness.time.pendingCount(), 0);
     harness.time.advanceBy(100);
     assert.equal(reads, 1);
@@ -525,10 +557,121 @@ test("initial tracked-book retries are bounded, cancellable, and terminal for ma
     await harness.ready();
     await harness.tracking.settled();
     assert.equal(reads, 1);
+    assert.deepEqual(harness.errors.map((error) => error.message), [
+      "stored books are malformed",
+    ]);
     assert.equal(harness.time.pendingCount(), 0);
     assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
     harness.tracking.destroy();
   });
+});
+
+test("tracked canonical position restores without an initialization write or handoff", async () => {
+  const reads = [];
+  const handoffs = [];
+  const saved = canonicalRecord({ currentPage: 3, scrollTop: 480 });
+  const harness = createPdfJsHarness({
+    async getBook(fileUrl) {
+      reads.push(fileUrl);
+      return saved;
+    },
+    handoffPosition(fileUrl, position) {
+      handoffs.push({ fileUrl, position });
+    },
+  });
+
+  await harness.ready();
+  harness.time.advanceBy(5_000);
+  await harness.tracking.settled();
+  harness.tracking.handoff();
+
+  assert.deepEqual(reads, [BOOK_URL]);
+  assert.equal(harness.application.pdfViewer.currentPageNumber, 3);
+  assert.equal(harness.container.scrollTop, 480);
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(handoffs, [], "restoration alone must not advance lastReadAt");
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+  harness.tracking.destroy();
+});
+
+test("reopening the same canonical URL restores independently and cleans each listener set", async () => {
+  const reads = [];
+  const savedPositions = [
+    canonicalRecord({ currentPage: 2, scrollTop: 220 }),
+    canonicalRecord({ currentPage: 6, scrollTop: 660 }),
+  ];
+
+  for (const saved of savedPositions) {
+    const harness = createPdfJsHarness({
+      async getBook(fileUrl) {
+        reads.push(fileUrl);
+        return saved;
+      },
+    });
+    await harness.ready();
+    assert.equal(harness.application.pdfViewer.currentPageNumber, saved.currentPage);
+    assert.equal(harness.container.scrollTop, saved.scrollTop);
+    assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+    harness.tracking.destroy();
+    assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  }
+
+  assert.deepEqual(reads, [BOOK_URL, BOOK_URL]);
+});
+
+test("programmatic restore events cannot clobber the saved baseline before the handoff", async () => {
+  let starts = 0;
+  const harness = createPdfJsHarness({
+    getBook: async () => canonicalRecord({ currentPage: 8, scrollTop: 800 }),
+    async restorePosition({ application, container, eventBus, startTracking }) {
+      application.pdfViewer.currentPageNumber = 1;
+      container.scrollTop = 0;
+      eventBus.dispatch("pagechanging", { source: application.pdfViewer });
+      container.dispatch("scroll");
+      eventBus.dispatch("updateviewarea", { source: application.pdfViewer });
+      await drainMicrotasks();
+      application.pdfViewer.currentPageNumber = 8;
+      container.scrollTop = 800;
+      starts += 1;
+      startTracking(
+        { currentPage: 8, scrollTop: 800 },
+        { currentPage: 8, scrollTop: 800 },
+      );
+    },
+  });
+
+  await harness.ready();
+  harness.time.advanceBy(5_000);
+  await harness.tracking.settled();
+
+  assert.equal(starts, 1);
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+  harness.tracking.destroy();
+});
+
+test("an early user action at tracker handoff is saved exactly once", async () => {
+  const harness = createPdfJsHarness({
+    getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
+    async restorePosition({ startTracking }) {
+      startTracking(
+        { currentPage: 4, scrollTop: 400 },
+        { currentPage: 5, scrollTop: 550 },
+      );
+    },
+  });
+
+  await harness.ready();
+  harness.time.advanceBy(967);
+  assert.deepEqual(harness.calls, []);
+  harness.time.advanceBy(1);
+  await harness.tracking.settled();
+
+  assert.deepEqual(harness.calls.map(({ position }) => position), [
+    { currentPage: 5, scrollTop: 550 },
+  ]);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+  harness.tracking.destroy();
 });
 
 test("real PDF.js page and canonical container scroll events are coalesced", async () => {
@@ -613,9 +756,9 @@ test("listeners are registered once and removed on teardown or document replacem
   harness.application.pdfViewer.currentPageNumber = 10;
   harness.container.scrollTop = 1_000;
   harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
-  const replacement = { id: "replacement" };
+  const replacement = { id: "replacement", numPages: 2 };
   harness.application.pdfDocument = replacement;
-  harness.eventBus.dispatch("pagesinit", { source: harness.application.pdfViewer });
+  harness.eventBus.dispatch("pagesdestroy", { source: harness.application.pdfViewer });
   await Promise.resolve();
   assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
   assert.equal(harness.container.listenerCount("scroll"), 0);
@@ -825,8 +968,14 @@ test("production composition wires canonical boot, actual tracking, worker hando
     appConfig: { mainContainer: container },
     eventBus,
     initializedPromise: Promise.resolve(),
-    pdfDocument: { id: "production-document" },
-    pdfViewer: { currentPageNumber: 1, pagesCount: 20 },
+    pdfDocument: { id: "production-document", numPages: 20 },
+    pdfViewer: {
+      currentPageNumber: 1,
+      getPageView() {
+        return { renderingState: 3 };
+      },
+      pagesCount: 20,
+    },
   };
   const frame = new FakeEventTarget();
   frame.contentWindow = { PDFViewerApplication: application };
@@ -876,7 +1025,7 @@ test("production composition wires canonical boot, actual tracking, worker hando
   assert.deepEqual(bootCalls[0].view, { errorPanel, errorMessage, frame });
   assert.equal(app.viewer.fileUrl, BOOK_URL);
   frame.dispatch("load");
-  await drainMicrotasks();
+  await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(getBookCalls, 1);
   assert.equal(eventBus.listenerCount("pagechanging"), 1);
 
