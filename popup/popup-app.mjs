@@ -27,6 +27,18 @@ function candidateFromTabs(tabs) {
   }
 }
 
+function pendingUrlMatches(tab, fileUrl) {
+  if (!tab.pendingUrl) {
+    return true;
+  }
+
+  try {
+    return canonicalizeLocalPdfUrl(tab.pendingUrl).href === fileUrl;
+  } catch {
+    return false;
+  }
+}
+
 export function createPopupApp({
   queryActiveTab,
   getTab,
@@ -79,7 +91,11 @@ export function createPopupApp({
     try {
       const currentTab = await getTab(candidate.tabId);
       const currentCandidate = candidateFromTabs([currentTab]);
-      if (!currentCandidate || currentCandidate.fileUrl !== candidate.fileUrl) {
+      if (
+        !currentCandidate ||
+        currentCandidate.fileUrl !== candidate.fileUrl ||
+        !pendingUrlMatches(currentTab, candidate.fileUrl)
+      ) {
         throw new Error("The original tab no longer shows this local PDF.");
       }
 
@@ -92,7 +108,10 @@ export function createPopupApp({
       stage = "redirect";
       const viewerPath = `viewer.html?file=${encodeURIComponent(candidate.fileUrl)}`;
       const viewerUrl = getRuntimeUrl(viewerPath);
-      await updateTab(candidate.tabId, { url: viewerUrl });
+      const redirectedTab = await updateTab(candidate.tabId, { url: viewerUrl });
+      if (redirectedTab === undefined) {
+        throw new Error("The original tab could not be opened in the viewer.");
+      }
       render("showSuccess", {
         filename: candidate.filename,
         message: "Book tracked. Opening the viewer…",

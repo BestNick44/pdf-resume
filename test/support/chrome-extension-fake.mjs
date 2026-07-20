@@ -19,6 +19,7 @@ export function createChromeExtensionFake({
   let selectedTabId = activeTabId;
   const failures = new Map();
   const holds = new Map();
+  const undefinedResults = new Map();
   const tabOperations = [];
 
   async function invoke(method, details, operation) {
@@ -33,7 +34,8 @@ export function createChromeExtensionFake({
     if (failure) {
       throw failure;
     }
-    const result = operation();
+    const returnUndefined = undefinedResults.get(method)?.shift();
+    const result = returnUndefined ? undefined : operation();
     if (hold?.after) {
       hold.started.resolve();
       await hold.released.promise;
@@ -99,6 +101,11 @@ export function createChromeExtensionFake({
       queued.push(hold);
       holds.set(method, queued);
       return { started: hold.started.promise, release: hold.released.resolve };
+    },
+    returnUndefinedNext(method) {
+      const queued = undefinedResults.get(method) ?? [];
+      queued.push(true);
+      undefinedResults.set(method, queued);
     },
     selectTab(tabId) {
       selectedTabId = tabId;

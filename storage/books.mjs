@@ -255,6 +255,19 @@ function currentTimestamp(now) {
   return timestamp;
 }
 
+function createInitialRecord(timestamp, patch) {
+  return {
+    title: "",
+    customTitle: null,
+    totalPages: 0,
+    currentPage: 1,
+    scrollTop: 0,
+    addedAt: timestamp,
+    lastReadAt: timestamp,
+    ...patch,
+  };
+}
+
 export function createBooksStorage({
   storageArea,
   lockManager,
@@ -307,15 +320,7 @@ export function createBooksStorage({
           return clone(existing);
         }
         const timestamp = currentTimestamp(now);
-        const created = {
-          title: validPatch.title,
-          customTitle: null,
-          totalPages: 0,
-          currentPage: 1,
-          scrollTop: 0,
-          addedAt: timestamp,
-          lastReadAt: timestamp,
-        };
+        const created = createInitialRecord(timestamp, validPatch);
         books[canonicalUrl] = created;
         await storageArea.set({ [BOOKS_KEY]: books });
         return clone(created);
@@ -331,16 +336,7 @@ export function createBooksStorage({
         const existing = books[canonicalUrl];
         const updated = existing
           ? { ...existing, ...validPatch }
-          : {
-              title: "",
-              customTitle: null,
-              totalPages: 0,
-              currentPage: 1,
-              scrollTop: 0,
-              addedAt: timestamp,
-              lastReadAt: timestamp,
-              ...validPatch,
-            };
+          : createInitialRecord(timestamp, validPatch);
         if (Object.hasOwn(validPatch, "totalPages")) {
           validatePageRange(updated);
         }

@@ -230,8 +230,18 @@ test("activation durably creates the canonical record before redirecting that ex
   ]);
 });
 
-test("same-tab revalidation rejects navigation and closure before any write", async (t) => {
-  await t.test("tab navigated", async () => {
+test("same-tab revalidation rejects committed or pending navigation before any write", async (t) => {
+  const assertRejectedBeforeWrite = async (harness) => {
+    await harness.app.start();
+    await harness.view.activate();
+
+    assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+    assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+    assert.deepEqual(harness.fake.storageFake.snapshot(), {});
+    assert.match(harness.view.calls.at(-1)[1].message, /no longer shows.*No book was tracked/i);
+  };
+
+  await t.test("tab committed a different PDF", async () => {
     const harness = createHarness();
     await harness.app.start();
     harness.fake.setTabUrl(TAB_ID, "file:///Users/reader/Books/Other.pdf");
@@ -244,6 +254,18 @@ test("same-tab revalidation rejects navigation and closure before any write", as
     assert.match(harness.view.calls.at(-1)[1].message, /no longer shows.*No book was tracked/i);
   });
 
+  for (const [name, pendingUrl] of [
+    ["tab is pending navigation to another local PDF", "file:///Users/reader/Books/Other.pdf"],
+    ["tab is pending navigation to a remote PDF", "https://example.test/Other.pdf"],
+    ["tab has a malformed pending URL", "file:///Users/reader/Books/Other%ZZ.pdf"],
+  ]) {
+    await t.test(name, () =>
+      assertRejectedBeforeWrite(
+        createHarness({ activeTab: { id: TAB_ID, url: BOOK_URL, pendingUrl } }),
+      ),
+    );
+  }
+
   await t.test("tab closed", async () => {
     const harness = createHarness();
     await harness.app.start();
@@ -255,6 +277,23 @@ test("same-tab revalidation rejects navigation and closure before any write", as
     assert.equal(startedTabOperations(harness.fake, "update").length, 0);
     assert.deepEqual(harness.fake.storageFake.snapshot(), {});
   });
+});
+
+test("canonically equivalent pending navigation may track and open the captured PDF", async () => {
+  const harness = createHarness({
+    activeTab: {
+      id: TAB_ID,
+      url: BOOK_URL,
+      pendingUrl: "file:///Users/reader/Books/A Book.pdf",
+    },
+  });
+
+  await harness.app.start();
+  await harness.view.activate();
+
+  assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
+  assert.equal(startedTabOperations(harness.fake, "update").length, 1);
+  assert.equal(harness.view.calls.at(-1)[0], "success");
 });
 
 test("a concurrent tracker wins without its record being patched or duplicated", async () => {
@@ -300,30 +339,38 @@ test("storage failure is retryable and never redirects before a durable record",
   assert.equal(startedTabOperations(harness.fake, "update").length, 1);
 });
 
-test("redirect failure preserves the authorized record and retries navigation without rewriting", async () => {
-  const harness = createHarness();
-  await harness.app.start();
-  harness.fake.failNext("update", new Error("navigation denied"));
+test("redirect failure preserves the authorized record and retries navigation without rewriting", async (t) => {
+  for (const [name, arrangeFailure] of [
+    ["rejected update", (fake) => fake.failNext("update", new Error("navigation denied"))],
+    ["fulfilled undefined update", (fake) => fake.returnUndefinedNext("update")],
+  ]) {
+    await t.test(name, async () => {
+      const harness = createHarness();
+      await harness.app.start();
+      arrangeFailure(harness.fake);
 
-  await harness.view.activate();
+      await harness.view.activate();
 
-  assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
-  assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
-  assert.deepEqual(harness.view.calls.at(-1), [
-    "error",
-    {
-      filename: "A Book",
-      actionLabel: "Retry opening viewer",
-      message:
-        "This book is tracked, but the original PDF tab could not be opened in the viewer. Return that tab to the same PDF and retry.",
-      persisted: true,
-    },
-  ]);
+      assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
+      assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
+      assert.deepEqual(harness.view.calls.at(-1), [
+        "error",
+        {
+          filename: "A Book",
+          actionLabel: "Retry opening viewer",
+          message:
+            "This book is tracked, but the original PDF tab could not be opened in the viewer. Return that tab to the same PDF and retry.",
+          persisted: true,
+        },
+      ]);
 
-  await harness.view.activate();
-  assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
-  assert.equal(startedTabOperations(harness.fake, "update").length, 2);
-  assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
+      await harness.view.activate();
+      assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
+      assert.equal(startedTabOperations(harness.fake, "update").length, 2);
+      assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
+      assert.equal(harness.view.calls.at(-1)[0], "success");
+    });
+  }
 });
 
 test("double pointer or keyboard activation is serialized into one track and redirect", async () => {
