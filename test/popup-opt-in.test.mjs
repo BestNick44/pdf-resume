@@ -215,6 +215,7 @@ test("activation durably creates the canonical record before redirecting that ex
   });
   const expectedViewerUrl =
     "chrome-extension://abcdefghijklmnopabcdefghijklmnop/viewer.html?file=file%3A%2F%2F%2FUsers%2Freader%2FBooks%2FA%2520Book.pdf";
+  assert.equal(startedTabOperations(harness.fake, "get").length, 2);
   assert.deepEqual(startedTabOperations(harness.fake, "update"), [
     {
       method: "update",
@@ -277,6 +278,56 @@ test("same-tab revalidation rejects committed or pending navigation before any w
     assert.equal(startedTabOperations(harness.fake, "update").length, 0);
     assert.deepEqual(harness.fake.storageFake.snapshot(), {});
   });
+});
+
+test("post-persistence revalidation preserves the record without overwriting newer tab navigation", async (t) => {
+  const cases = [
+    {
+      name: "tab commits a different PDF while storage is blocked",
+      mutateTab: (fake) => fake.setTabUrl(TAB_ID, "file:///Users/reader/Books/Other.pdf"),
+    },
+    {
+      name: "tab gains remote pending navigation while storage is blocked",
+      mutateTab: (fake) => fake.setTabPendingUrl(TAB_ID, "https://example.test/Other.pdf"),
+    },
+    {
+      name: "tab gains malformed pending navigation while storage is blocked",
+      mutateTab: (fake) => fake.setTabPendingUrl(TAB_ID, "file:///Users/reader/Books/Other%ZZ.pdf"),
+    },
+    {
+      name: "tab closes while storage is blocked",
+      mutateTab: (fake) => fake.closeTab(TAB_ID),
+    },
+  ];
+
+  for (const { name, mutateTab } of cases) {
+    await t.test(name, async () => {
+      const harness = createHarness();
+      await harness.app.start();
+      const heldWrite = harness.fake.storageFake.holdNext("set");
+
+      const activation = harness.view.activate();
+      await heldWrite.started;
+      mutateTab(harness.fake);
+      heldWrite.release();
+      await activation;
+
+      assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
+      assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
+      assert.equal(startedTabOperations(harness.fake, "get").length, 2);
+      assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+      assert.deepEqual(harness.view.calls.at(-1), [
+        "error",
+        {
+          filename: "A Book",
+          actionLabel: "Retry opening viewer",
+          message:
+            "This book is tracked, but the original PDF tab could not be opened in the viewer. Return that tab to the same PDF and retry.",
+          persisted: true,
+        },
+      ]);
+    });
+  }
 });
 
 test("canonically equivalent pending navigation may track and open the captured PDF", async () => {

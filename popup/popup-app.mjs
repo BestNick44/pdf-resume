@@ -39,6 +39,13 @@ function pendingUrlMatches(tab, fileUrl) {
   }
 }
 
+function tabMatchesCandidate(tab, candidate) {
+  const currentCandidate = candidateFromTabs([tab]);
+  return (
+    currentCandidate?.fileUrl === candidate.fileUrl && pendingUrlMatches(tab, candidate.fileUrl)
+  );
+}
+
 export function createPopupApp({
   queryActiveTab,
   getTab,
@@ -90,12 +97,7 @@ export function createPopupApp({
 
     try {
       const currentTab = await getTab(candidate.tabId);
-      const currentCandidate = candidateFromTabs([currentTab]);
-      if (
-        !currentCandidate ||
-        currentCandidate.fileUrl !== candidate.fileUrl ||
-        !pendingUrlMatches(currentTab, candidate.fileUrl)
-      ) {
+      if (!tabMatchesCandidate(currentTab, candidate)) {
         throw new Error("The original tab no longer shows this local PDF.");
       }
 
@@ -108,6 +110,10 @@ export function createPopupApp({
       stage = "redirect";
       const viewerPath = `viewer.html?file=${encodeURIComponent(candidate.fileUrl)}`;
       const viewerUrl = getRuntimeUrl(viewerPath);
+      const redirectCandidate = await getTab(candidate.tabId);
+      if (!tabMatchesCandidate(redirectCandidate, candidate)) {
+        throw new Error("The original tab no longer shows this local PDF.");
+      }
       const redirectedTab = await updateTab(candidate.tabId, { url: viewerUrl });
       if (redirectedTab === undefined) {
         throw new Error("The original tab could not be opened in the viewer.");

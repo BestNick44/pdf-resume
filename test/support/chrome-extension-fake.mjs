@@ -114,6 +114,12 @@ export function createChromeExtensionFake({
       const tab = tabMap.get(tabId);
       return tab && structuredClone(tab);
     },
+    setTabPendingUrl(tabId, pendingUrl) {
+      const tab = tabMap.get(tabId);
+      if (tab) {
+        tab.pendingUrl = pendingUrl;
+      }
+    },
     setTabUrl(tabId, url) {
       const tab = tabMap.get(tabId);
       if (tab) {
