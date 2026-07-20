@@ -1,0 +1,15 @@
+{
+  "name": "pdf-resume",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Chrome and Brave extension that remembers reading position in local PDFs.",
+  "scripts": {
+    "format:check": "node scripts/check-format.mjs",
+    "lint": "node --check background.js && node --check scripts/check-format.mjs && node --check test/extension-contract.test.mjs",
+    "test": "node --test",
+    "check": "npm run format:check && npm run lint && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

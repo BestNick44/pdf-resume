@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "pdf-resume",
+  "description": "Remember your reading position in local PDF books.",
+  "version": "0.1.0",
+  "permissions": [
+    "storage",
+    "webNavigation",
+    "tabs"
+  ],
+  "host_permissions": [
+    "file:///*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "pdf-resume",
+    "default_popup": "popup/popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none';"
+  }
+}
