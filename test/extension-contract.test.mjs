@@ -10,6 +10,10 @@ import test from "node:test";
 const execFileAsync = promisify(execFile);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, "..");
+const expectedExtensionCsp = {
+  extension_pages:
+    "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; connect-src 'self' file: blob: data:; worker-src 'self'; style-src 'self'; font-src 'self' data:; img-src 'self' blob: data:;",
+};
 
 async function readManifest() {
   return JSON.parse(await readFile(path.join(projectRoot, "manifest.json"), "utf8"));
@@ -123,10 +127,7 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   const resourcePattern = /<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"[^>]*>/gi;
   const resources = [...popup.matchAll(resourcePattern)].map((match) => match[1]);
 
-  assert.deepEqual(manifest.content_security_policy, {
-    extension_pages:
-      "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; connect-src 'self' file: blob: data:; worker-src 'self'; style-src 'self'; font-src 'self' data:; img-src 'self' blob: data:;",
-  });
+  assert.deepEqual(manifest.content_security_policy, expectedExtensionCsp);
   assert.equal(resources.length > 0, true, "popup should load at least one local asset");
   assert.doesNotMatch(popup, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
   assert.doesNotMatch(popup, /\son[a-z]+\s*=/i);
@@ -197,7 +198,14 @@ test("viewer boot keeps local input out of markup and passes only a blob URL to 
   assert.doesNotMatch(viewer, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
   assert.doesNotMatch(entry, /innerHTML|insertAdjacentHTML|document\.write/);
   assert.match(entry, /fetch\(fileUrl\.href/);
-  assert.match(entry, /URL\.createObjectURL/);
+  assert.match(entry, /const pdfBlob = await response\.blob\(\);/);
+  assert.match(
+    entry,
+    /const signatureBytes = await pdfBlob\.slice\(0, 1024\)\.arrayBuffer\(\);/,
+  );
+  assert.match(entry, /new TextDecoder\("ascii"\)\.decode\(signatureBytes\)/);
+  assert.match(entry, /URL\.createObjectURL\(pdfBlob\)/);
+  assert.doesNotMatch(entry, /response\.arrayBuffer\(\)|new Blob\s*\(/);
   assert.match(entry, /frame\.src = buildPdfJsViewerUrl/);
   assert.equal(viewerUrl.origin, "null");
   assert.equal(viewerUrl.pathname, "/viewer/pdfjs/web/viewer.html");
@@ -329,10 +337,7 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
   const appFiles = ["viewer.html", "viewer/viewer.css", "viewer/viewer-entry.mjs"];
   const resourceAttribute = /<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"[^>]*>/gi;
 
-  assert.deepEqual(manifest.content_security_policy, {
-    extension_pages:
-      "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; connect-src 'self' file: blob: data:; worker-src 'self'; style-src 'self'; font-src 'self' data:; img-src 'self' blob: data:;",
-  });
+  assert.deepEqual(manifest.content_security_policy, expectedExtensionCsp);
   assert.deepEqual(manifest.host_permissions, ["file:///*"]);
 
   for (const appFile of appFiles) {
@@ -354,6 +359,22 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
 
 test("third-party notices preserve PDF.js and bundled asset licenses", async () => {
   const notices = await readFile(resolveExtensionPath("THIRD_PARTY_NOTICES.md"), "utf8");
+  const licenseContracts = [
+    {
+      path: "licenses/quickjs-MIT.txt",
+      sha256: "598fd7fc928e4350abce36e337ba5a1346923c5c692f5be92c3d8e29ddd7c18d",
+      notices: [
+        /QuickJS Javascript Engine/,
+        /Copyright \(c\) 2017-2021 Fabrice Bellard/,
+        /Copyright \(c\) 2017-2021 Charlie Gordon/,
+      ],
+    },
+    {
+      path: "licenses/pdf.js.quickjs-MIT.txt",
+      sha256: "7fdaed3d938f3dfce7189db07e74773c23789143a55db81a95d09dcbfda267b0",
+      notices: [/MIT License/, /Copyright \(c\) 2026 Mozilla Foundation/],
+    },
+  ];
 
   assert.match(notices, /PDF\.js 6\.1\.200/);
   assert.match(notices, /Apache License 2\.0/);
@@ -363,4 +384,19 @@ test("third-party notices preserve PDF.js and bundled asset licenses", async () 
   assert.match(notices, /OpenJPEG/i);
   assert.match(notices, /JBIG2/i);
   assert.match(notices, /QCMS/i);
+  assert.match(notices, /QuickJS MIT license\]\(licenses\/quickjs-MIT\.txt\)/);
+  assert.match(notices, /pdf\.js\.quickjs MIT license\]\(licenses\/pdf\.js\.quickjs-MIT\.txt\)/);
+  assert.match(notices, /v6\.1\.200.*6353acefe5007cd4899247a8c4e83cb7c9435a54/);
+  assert.match(notices, /3d5e064e9dd67c70f7962836505a7fa067bf0a4e/);
+  assert.match(notices, /b62f7cd527363ca2c1fe7467f274bc9acbf78c24/);
+
+  for (const contract of licenseContracts) {
+    const license = await readFile(resolveExtensionPath(contract.path), "utf8");
+    assert.equal(createHash("sha256").update(license).digest("hex"), contract.sha256);
+    assert.match(license, /Permission is hereby granted, free of charge/);
+    assert.match(license, /THE SOFTWARE IS PROVIDED "AS IS"/);
+    for (const notice of contract.notices) {
+      assert.match(license, notice);
+    }
+  }
 });

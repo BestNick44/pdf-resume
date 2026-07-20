@@ -26,13 +26,14 @@ try {
     throw new Error(`Local file request failed (${response.status}).`);
   }
 
-  const pdfBytes = await response.arrayBuffer();
-  const signature = new TextDecoder("ascii").decode(pdfBytes.slice(0, 1024));
+  const pdfBlob = await response.blob();
+  const signatureBytes = await pdfBlob.slice(0, 1024).arrayBuffer();
+  const signature = new TextDecoder("ascii").decode(signatureBytes);
   if (!signature.includes("%PDF-")) {
     throw new ViewerInputError();
   }
 
-  objectUrl = URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" }));
+  objectUrl = URL.createObjectURL(pdfBlob);
   frame.addEventListener("load", () => frame.focus(), { once: true });
   frame.src = buildPdfJsViewerUrl(
     objectUrl,
