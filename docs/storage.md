@@ -5,6 +5,7 @@
 ## API
 
 - `getBook(fileUrl)` returns a cloned record or `undefined`.
+- `trackBook(fileUrl, { title })` creates the canonical initial record with default metadata and position. If the record already exists when its cross-context lock is granted, it returns that record unchanged and does not write.
 - `listBooks()` returns cloned `{ fileUrl, book }` entries sorted by canonical URL in ascending code-unit order.
 - `upsertBook(fileUrl, patch)` creates a record or patches only `title`, `customTitle`, and `totalPages`. Omitted fields are preserved. New records default to `customTitle: null`, `totalPages: 0`, `currentPage: 1`, and `scrollTop: 0`; `title` defaults to the empty string.
 - `hydrateMetadata(fileUrl, { title, totalPages }, { signal })` updates an existing record only while its durable `totalPages` is `0`. It requires a positive page count and preserves every other field even when the preserved `currentPage` is above the actual total, never creates a removed or untracked record, and may be aborted before its write. An already hydrated record is returned without a write.
@@ -21,7 +22,7 @@ Chrome documents Storage as an asynchronous bulk key/value API available to all 
 
 Lock acquisition is bounded at 25 seconds, below Chrome's approximately 30-second inactive extension-service-worker deadline. If the lock is not granted before that bound, the request rejects before its callback runs and storage is not touched. Callers must await every mutation and retry rejected operations when appropriate; starting a mutation without awaiting it can lose the rejection when its context closes.
 
-All app writers must use this module and the Web Locks API must be available. A direct `chrome.storage.local.set({ books: ... })` writer would violate the serialization contract and can lose concurrent changes. The lock serializes cooperating live contexts, but neither Web Locks nor `chrome.storage.local` provides durable transaction atomicity if a context is terminated during the read-modify-write sequence. Reads may observe either the complete value before or after a completed mutation.
+Popup opt-in uses `trackBook` so two concurrent tracking attempts cannot overwrite the first durable record's title or timestamps. All app writers must use this module and the Web Locks API must be available. A direct `chrome.storage.local.set({ books: ... })` writer would violate the serialization contract and can lose concurrent changes. The lock serializes cooperating live contexts, but neither Web Locks nor `chrome.storage.local` provides durable transaction atomicity if a context is terminated during the read-modify-write sequence. Reads may observe either the complete value before or after a completed mutation.
 
 ## Viewer position delivery
 

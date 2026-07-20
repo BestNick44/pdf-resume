@@ -8,10 +8,15 @@
     <script src="popup-entry.mjs" type="module"></script>
   </head>
   <body>
-    <main>
+    <main id="popupMain" aria-busy="true">
       <h1>pdf-resume</h1>
-      <p class="status" role="status">pdf-resume is ready.</p>
-      <p>Tracking controls will arrive in a later milestone.</p>
+      <p id="popupStatus" class="status" role="status" aria-live="polite">Checking the active tab…</p>
+      <section id="popupBook" aria-labelledby="bookFilename" hidden>
+        <h2 id="bookFilename"></h2>
+      </section>
+      <p id="popupMessage" hidden></p>
+      <p id="popupError" role="alert" hidden></p>
+      <button id="trackButton" type="button" hidden>Track this book</button>
     </main>
   </body>
 </html>

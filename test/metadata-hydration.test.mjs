@@ -6,7 +6,7 @@ import {
   normalizePdfMetadataTitle,
   resolveAutomaticBookTitle,
   titleFromLocalPdfFilename,
-} from "../viewer/book-metadata.mjs";
+} from "../shared/book-title.mjs";
 import { createPdfJsMetadataHydration } from "../viewer/pdfjs-metadata-hydration.mjs";
 import { createChromeStorageFake } from "./support/chrome-storage-fake.mjs";
 import { createFakeScheduler } from "./support/fake-scheduler.mjs";

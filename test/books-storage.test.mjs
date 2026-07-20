@@ -6,6 +6,7 @@ import {
   getBook,
   listBooks,
   removeBook,
+  trackBook,
   updatePosition,
   upsertBook,
 } from "../storage/books.mjs";
@@ -71,6 +72,35 @@ test("absent books storage reads as an empty library", async () => {
   assert.equal(await books.getBook(BOOK_A), undefined);
   assert.deepEqual(await books.listBooks(), []);
   assert.deepEqual(fake.snapshot(), {});
+});
+
+test("track creates the initial record once and preserves a concurrently created record", async () => {
+  const fake = createChromeStorageFake();
+  const firstStore = createTestBooksStorage(fake, 1_800_000_000);
+  const secondStore = createTestBooksStorage(fake, 1_800_000_001);
+  const heldWrite = fake.holdNext("set");
+
+  const firstTrack = firstStore.trackBook(BOOK_A, { title: "A Book" });
+  await heldWrite.started;
+  const concurrentTrack = secondStore.trackBook(BOOK_A, { title: "Competing title" });
+  heldWrite.release();
+
+  const expected = {
+    title: "A Book",
+    customTitle: null,
+    totalPages: 0,
+    currentPage: 1,
+    scrollTop: 0,
+    addedAt: 1_800_000_000,
+    lastReadAt: 1_800_000_000,
+  };
+  assert.deepEqual(await firstTrack, expected);
+  assert.deepEqual(await concurrentTrack, expected);
+  assert.deepEqual(fake.snapshot(), { books: { [BOOK_A]: expected } });
+  assert.equal(
+    fake.operations.filter(({ method, phase }) => method === "set" && phase === "start").length,
+    1,
+  );
 });
 
 test("upsert creates a canonical record with documented defaults and timestamps", async () => {
@@ -532,12 +562,14 @@ test("top-level API resolves Chrome dependencies lazily in extension contexts", 
   const restore = setProductionGlobals(fake);
 
   try {
-    const created = await upsertBook(BOOK_A, { title: "A" });
+    const created = await trackBook(BOOK_A, { title: "A" });
     assert.deepEqual(await getBook(BOOK_A), created);
-    assert.deepEqual(await listBooks(), [{ fileUrl: BOOK_A, book: created }]);
+    const updated = await upsertBook(BOOK_A, { title: "Updated" });
+    assert.deepEqual(updated, { ...created, title: "Updated" });
+    assert.deepEqual(await listBooks(), [{ fileUrl: BOOK_A, book: updated }]);
     assert.deepEqual(
       await updatePosition(BOOK_A, { currentPage: 2, scrollTop: 10 }),
-      { ...created, currentPage: 2, scrollTop: 10 },
+      { ...updated, currentPage: 2, scrollTop: 10 },
     );
     assert.equal(await removeBook(BOOK_A), true);
   } finally {
