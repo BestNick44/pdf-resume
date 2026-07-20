@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = path.resolve(import.meta.dirname, "..");
+const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(scriptDirectory, "..");
 const ignoredDirectories = new Set([".git", "node_modules"]);
 const textExtensions = new Set([".css", ".html", ".js", ".json", ".md", ".mjs"]);
 
