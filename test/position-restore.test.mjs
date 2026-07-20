@@ -287,6 +287,19 @@ test("a persisted stale page clamps only against the loaded document at runtime"
   });
 });
 
+test("a saved page above stale-low metadata restores against the longer loaded PDF", async () => {
+  const harness = createRestoreHarness({ documentPages: 8 });
+  const savedPosition = { currentPage: 8, scrollTop: 800, totalPages: 7 };
+  const restored = harness.start(savedPosition);
+  await harness.render(8);
+  await harness.finishLayout();
+  await restored;
+
+  assert.deepEqual(harness.navigation, [8]);
+  assert.deepEqual(harness.starts, [{ currentPage: 8, scrollTop: 800 }]);
+  assert.deepEqual(savedPosition, { currentPage: 8, scrollTop: 800, totalPages: 7 });
+});
+
 test("unknown saved totalPages uses the actual loaded document page count", async () => {
   const harness = createRestoreHarness({ documentPages: 5 });
   const restored = harness.start({ currentPage: 5, scrollTop: 300, totalPages: 0 });

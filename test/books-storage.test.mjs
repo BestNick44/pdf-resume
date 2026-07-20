@@ -156,14 +156,27 @@ test("position updates preserve metadata and only advance position and last-read
   assert.equal(updated.addedAt, existing.addedAt);
 });
 
-test("position updates reject an explicit page above the known total", async () => {
-  const existing = canonicalRecord({ currentPage: 200, totalPages: 300 });
+test("position updates can advance beyond a stale known total without changing metadata", async () => {
+  const existing = canonicalRecord({
+    customTitle: "Reader override",
+    currentPage: 7,
+    totalPages: 7,
+  });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
   const books = createTestBooksStorage(fake);
 
-  await assert.rejects(() => books.updatePosition(BOOK_A, { currentPage: 301 }), /currentPage/i);
-  assert.deepEqual(fake.snapshot().books[BOOK_A], existing);
-  assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
+  const updated = await books.updatePosition(BOOK_A, {
+    currentPage: 8,
+    scrollTop: 800,
+  });
+
+  assert.deepEqual(updated, {
+    ...existing,
+    currentPage: 8,
+    scrollTop: 800,
+    lastReadAt: 1_800_000_000,
+  });
+  assert.deepEqual(fake.snapshot().books[BOOK_A], updated);
 });
 
 test("position updates can patch one position field and keep timestamps monotonic", async () => {
@@ -313,6 +326,8 @@ test("position patches reject invalid shapes before storage access", async () =>
     [],
     { title: "not position" },
     { currentPage: 1, extra: 1 },
+    { currentPage: -1 },
+    { currentPage: 0 },
     { currentPage: Number.NaN },
     { currentPage: Number.POSITIVE_INFINITY },
     { currentPage: 1.2 },

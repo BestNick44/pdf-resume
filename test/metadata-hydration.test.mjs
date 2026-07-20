@@ -125,7 +125,7 @@ function createHydrationHarness({
   };
 }
 
-test("meaningful PDF Title wins without rewriting Unicode or legitimate punctuation", () => {
+test("meaningful PDF Title wins without rewriting Unicode, punctuation, or emoji", () => {
   assert.equal(
     resolveAutomaticBookTitle(
       { info: { Title: "  L’été — 日本語: v1.2  " } },
@@ -135,12 +135,17 @@ test("meaningful PDF Title wins without rewriting Unicode or legitimate punctuat
   );
   assert.equal(normalizePdfMetadataTitle("Cafe\u0301"), "Café");
   assert.equal(normalizePdfMetadataTitle("Title: a punctuation test"), "Title: a punctuation test");
+  assert.equal(normalizePdfMetadataTitle("👩‍💻 — release_v1.2!"), "👩‍💻 — release_v1.2!");
 });
 
-test("absent, blank, control, URL, and path-like metadata titles use the filename", () => {
+test("separator-noise, invisible, control, URL, and path metadata titles use the filename", () => {
   const invalidTitles = [
     undefined,
     "   ",
+    "---",
+    "___–—",
+    "\u200B",
+    "Hidden\u200Btitle",
     "\u0000\u0007",
     "Unsafe\u202Etitle",
     "file:///Users/reader/secret.pdf",
@@ -176,10 +181,18 @@ test("filename fallback decodes Unicode and removes only separator noise and PDF
   );
 });
 
-test("filename cleanup retains an extensionless basename or a deterministic lowercase fallback", () => {
-  assert.equal(titleFromLocalPdfFilename("file:///tmp/---___.pdf"), "---___");
-  assert.equal(titleFromLocalPdfFilename("file:///tmp/%20---%20.pdf"), "---");
-  assert.equal(titleFromLocalPdfFilename("file:///tmp/.pdf"), "untitled");
+test("filename cleanup uses untitled for separator, invisible, or control-only basenames", () => {
+  const untitledUrls = [
+    "file:///tmp/---___.pdf",
+    "file:///tmp/%20---%20.pdf",
+    "file:///tmp/____.pdf",
+    "file:///tmp/%E2%80%8B%01.pdf",
+    "file:///tmp/.pdf",
+  ];
+
+  for (const fileUrl of untitledUrls) {
+    assert.equal(titleFromLocalPdfFilename(fileUrl), "untitled");
+  }
 });
 
 test("an all-separator filename still permits title and page-count hydration", async () => {
@@ -195,7 +208,7 @@ test("an all-separator filename still permits title and page-count hydration", a
 
   assert.deepEqual(writes[0].slice(0, 2), [
     fileUrl,
-    { title: "---___", totalPages: 7 },
+    { title: "untitled", totalPages: 7 },
   ]);
   assert.deepEqual(harness.errors, []);
   harness.hydration.destroy();

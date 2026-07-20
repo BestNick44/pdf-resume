@@ -1710,8 +1710,8 @@ test("viewer entry can be imported without extension globals", async () => {
   await import(`../viewer/viewer-entry.mjs?test=${Date.now()}`);
 });
 
-test("actual storage update preserves metadata and advances its module-managed timestamp", async () => {
-  const existing = canonicalRecord();
+test("actual tracking saves page 8 against stale total 7 without clobbering book state", async () => {
+  const existing = canonicalRecord({ currentPage: 7, totalPages: 7 });
   const fake = createChromeStorageFake({ books: { [BOOK_URL]: existing } });
   const storage = createBooksStorage({
     storageArea: fake.local,
@@ -1729,14 +1729,14 @@ test("actual storage update preserves metadata and advances its module-managed t
     update: client.updatePosition,
   });
 
-  controller.observe({ currentPage: 10, scrollTop: 1_010 });
+  controller.observe({ currentPage: 8, scrollTop: 808 });
   await controller.flush();
 
   assert.deepEqual(bridge.keptAlive, [true]);
   assert.deepEqual(fake.snapshot().books[BOOK_URL], {
     ...existing,
-    currentPage: 10,
-    scrollTop: 1_010,
+    currentPage: 8,
+    scrollTop: 808,
     lastReadAt: 1_800_000_000,
   });
 });

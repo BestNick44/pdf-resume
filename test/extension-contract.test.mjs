@@ -672,6 +672,7 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer/viewer-entry.mjs",
     "viewer/viewer-app.mjs",
     "viewer/book-metadata.mjs",
+    "viewer/pdfjs-initialization.mjs",
     "viewer/pdfjs-metadata-hydration.mjs",
     "viewer/pdfjs-position-restore.mjs",
     "viewer/pdfjs-position-tracking.mjs",

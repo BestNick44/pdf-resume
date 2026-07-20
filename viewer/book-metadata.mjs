@@ -1,10 +1,21 @@
-const UNSAFE_TITLE_CHARACTERS = /[\p{Cc}\u202A-\u202E\u2066-\u2069\uFEFF]/u;
+const UNSAFE_TITLE_CHARACTERS =
+  /[\p{Cc}\u00AD\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/u;
 const URL_LIKE_TITLE = /^(?:blob|data|file|https?|javascript):/iu;
 const ABSOLUTE_PATH_TITLE = /^(?:[a-z]:[\\/]|[\\/]{1,2})/iu;
 const PDF_PATH_TITLE = /[\\/][^\\/]*\.pdf$/iu;
+const TITLE_SEPARATOR_NOISE = /[\s._–—-]/gu;
+const INVISIBLE_OR_CONTROL_FORMATTING = /[\p{Cc}\p{Cf}]/gu;
 
 function normalizeWhitespace(value) {
   return value.replace(/\s+/gu, " ").trim();
+}
+
+function hasMeaningfulTitleContent(value) {
+  return (
+    value
+      .replace(TITLE_SEPARATOR_NOISE, "")
+      .replace(INVISIBLE_OR_CONTROL_FORMATTING, "").length > 0
+  );
 }
 
 export function normalizePdfMetadataTitle(value) {
@@ -14,7 +25,7 @@ export function normalizePdfMetadataTitle(value) {
 
   const title = normalizeWhitespace(value.normalize("NFC"));
   if (
-    !title ||
+    !hasMeaningfulTitleContent(title) ||
     URL_LIKE_TITLE.test(title) ||
     ABSOLUTE_PATH_TITLE.test(title) ||
     PDF_PATH_TITLE.test(title)
@@ -56,11 +67,8 @@ export function titleFromLocalPdfFilename(fileUrl) {
     .replace(/-{2,}/gu, " ")
     .replace(/\s+[-–—]\s+/gu, " ")
     .replace(/^[\s._–—-]+|[\s._–—-]+$/gu, "");
-  return (
-    normalizeWhitespace(cleaned) ||
-    normalizeWhitespace(withoutExtension) ||
-    "untitled"
-  );
+  const title = normalizeWhitespace(cleaned);
+  return hasMeaningfulTitleContent(title) ? title : "untitled";
 }
 
 export function resolveAutomaticBookTitle(metadataResult, fileUrl) {

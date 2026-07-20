@@ -1,45 +1,5 @@
 import { resolveAutomaticBookTitle } from "./book-metadata.mjs";
-
-const PDF_JS_INITIALIZATION_TIMEOUT_MILLISECONDS = 10_000;
-
-function waitForInitialization(initializedPromise, scheduler, signal) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let timer;
-
-    function finish(error, initialized = true) {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      scheduler.clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
-      if (error) {
-        reject(error);
-      } else {
-        resolve(initialized);
-      }
-    }
-
-    function onAbort() {
-      finish(undefined, false);
-    }
-
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) {
-      finish(undefined, false);
-      return;
-    }
-    timer = scheduler.setTimeout(
-      () => finish(new Error("PDF.js metadata initialization timed out.")),
-      PDF_JS_INITIALIZATION_TIMEOUT_MILLISECONDS,
-    );
-    Promise.resolve(initializedPromise).then(
-      () => finish(),
-      (error) => finish(error),
-    );
-  });
-}
+import { waitForPdfJsInitialization } from "./pdfjs-initialization.mjs";
 
 export function createPdfJsMetadataHydration({
   fileUrl,
@@ -175,7 +135,12 @@ export function createPdfJsMetadataHydration({
       return;
     }
     if (
-      !(await waitForInitialization(nextApplication.initializedPromise, scheduler, signal)) ||
+      !(await waitForPdfJsInitialization({
+        initializedPromise: nextApplication.initializedPromise,
+        scheduler,
+        signal,
+        timeoutErrorMessage: "PDF.js metadata initialization timed out.",
+      })) ||
       generation !== expectedGeneration ||
       frame.contentWindow !== frameWindow ||
       !nextApplication.eventBus ||

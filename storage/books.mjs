@@ -365,9 +365,6 @@ export function createBooksStorage({
           ...validPatch,
           lastReadAt: Math.max(existing.lastReadAt, currentTimestamp(now)),
         };
-        if (Object.hasOwn(validPatch, "currentPage")) {
-          validatePageRange(updated);
-        }
         books[canonicalUrl] = updated;
         await storageArea.set({ [BOOKS_KEY]: books });
         return clone(updated);
