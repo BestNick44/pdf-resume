@@ -1,3 +1,5 @@
+import { canonicalizeLocalPdfUrl } from "../shared/local-pdf-url.mjs";
+
 const INPUT_ERROR = "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.";
 
 export class ViewerInputError extends Error {
@@ -28,35 +30,11 @@ export function parseViewerFileQuery(search) {
     throw new ViewerInputError();
   }
 
-  let fileUrl;
   try {
-    fileUrl = new URL(decodedUrl);
+    return canonicalizeLocalPdfUrl(decodedUrl);
   } catch {
     throw new ViewerInputError();
   }
-
-  if (
-    fileUrl.protocol !== "file:" ||
-    (fileUrl.hostname && fileUrl.hostname !== "localhost") ||
-    fileUrl.username ||
-    fileUrl.password ||
-    fileUrl.port
-  ) {
-    throw new ViewerInputError();
-  }
-
-  let pathname;
-  try {
-    pathname = decodeURIComponent(fileUrl.pathname);
-  } catch {
-    throw new ViewerInputError();
-  }
-
-  if (!/\.pdf$/i.test(pathname) || pathname.includes("\0")) {
-    throw new ViewerInputError();
-  }
-
-  return fileUrl;
 }
 
 export function buildPdfJsViewerUrl(objectUrl, fileUrl, viewerUrl) {

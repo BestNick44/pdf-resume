@@ -91,7 +91,10 @@ test("manifest declares the milestone-one MV3 contract", async () => {
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(manifest.permissions, ["storage", "webNavigation", "tabs"]);
   assert.deepEqual(manifest.host_permissions, ["file:///*"]);
-  assert.deepEqual(manifest.background, { service_worker: "background.js" });
+  assert.deepEqual(manifest.background, {
+    service_worker: "background.js",
+    type: "module",
+  });
   assert.deepEqual(manifest.action, {
     default_title: "pdf-resume",
     default_popup: "popup/popup.html",
@@ -143,22 +146,55 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   }
 });
 
-test("background worker is valid JavaScript with no milestone-one side effects", async () => {
+test("background module entry point statically imports only the shared storage module", async () => {
   const manifest = await readManifest();
   const workerPath = resolveExtensionPath(manifest.background.service_worker);
   const worker = await readFile(workerPath, "utf8");
 
   await execFileAsync(process.execPath, ["--check", workerPath]);
-  assert.equal(worker.trim(), "");
+  assert.equal(manifest.background.type, "module");
+  assert.equal(worker.trim(), 'import "./storage/books.mjs";');
+  await assertFileExists("storage/books.mjs");
 });
 
-test("viewer accepts one canonically encoded local PDF URL", async () => {
+test("popup and viewer module entry points statically load the shared storage module", async () => {
+  const popup = await readFile(resolveExtensionPath("popup/popup.html"), "utf8");
+  const popupEntry = await readFile(resolveExtensionPath("popup/popup-entry.mjs"), "utf8");
+  const viewer = await readFile(resolveExtensionPath("viewer.html"), "utf8");
+  const viewerEntry = await readFile(resolveExtensionPath("viewer/viewer-entry.mjs"), "utf8");
+
+  assert.match(popup, /<script src="popup-entry\.mjs" type="module"><\/script>/i);
+  assert.equal(popupEntry.trim(), 'import "../storage/books.mjs";');
+  assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
+  assert.match(viewerEntry, /^import "\.\.\/storage\/books\.mjs";/);
+  await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
+  await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-entry.mjs")]);
+});
+
+test("shared storage module exposes its API without resolving extension globals on import", async () => {
+  const storageModule = await import("../storage/books.mjs");
+
+  assert.deepEqual(
+    ["getBook", "upsertBook", "removeBook", "listBooks", "updatePosition"].filter(
+      (operation) => typeof storageModule[operation] !== "function",
+    ),
+    [],
+  );
+});
+
+test("viewer accepts canonically encoded local PDF URLs", async () => {
   const { parseViewerFileQuery } = await import("../viewer/viewer-url.mjs");
   const localPdf = "file:///Users/reader/Books/A book (final).PDF#page=2";
+  const encodedExtensionPdf = "file:///Users/reader/Books/Encoded%2Epdf";
 
-  const parsed = parseViewerFileQuery(`?file=${encodeURIComponent(localPdf)}`);
-
-  assert.equal(parsed.href, "file:///Users/reader/Books/A%20book%20(final).PDF#page=2");
+  assert.equal(
+    parseViewerFileQuery(`?file=${encodeURIComponent(localPdf)}`).href,
+    "file:///Users/reader/Books/A%20book%20(final).PDF#page=2",
+  );
+  assert.equal(
+    parseViewerFileQuery(`?file=${encodeURIComponent(encodedExtensionPdf)}`).href,
+    encodedExtensionPdf,
+  );
 });
 
 test("viewer rejects absent, malformed, extra, remote, and non-PDF inputs", async () => {
@@ -537,6 +573,8 @@ test("viewer resources stay packaged and MV3 CSP permits only required local loa
     "viewer/viewer-boot.mjs",
     "viewer/viewer-url.mjs",
     "viewer/viewer-view.mjs",
+    "storage/books.mjs",
+    "shared/local-pdf-url.mjs",
   ];
   const resourceAttribute = /<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"[^>]*>/gi;
 
