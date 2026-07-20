@@ -1,4 +1,5 @@
 import { canonicalizeLocalPdfUrl } from "./local-pdf-url.mjs";
+import { validPosition as validPositionValues } from "./position.mjs";
 
 const UPDATE_POSITION_MESSAGE = "pdf-resume/private/update-position";
 const UPDATE_POSITION_RESULT = "pdf-resume/private/update-position-result";
@@ -44,14 +45,9 @@ function canonicalFileUrl(fileUrl) {
 }
 
 function validPosition(position) {
-  const result = ownDataObject(position, POSITION_FIELDS, "position");
-  if (!Number.isInteger(result.currentPage) || result.currentPage < 1) {
-    throw new TypeError("currentPage must be a positive integer");
-  }
-  if (!Number.isFinite(result.scrollTop) || result.scrollTop < 0) {
-    throw new TypeError("scrollTop must be a finite non-negative number");
-  }
-  return result;
+  return validPositionValues(
+    ownDataObject(position, POSITION_FIELDS, "position"),
+  );
 }
 
 function createMessage(fileUrl, position) {

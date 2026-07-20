@@ -34,11 +34,23 @@ async function drainMicrotasks() {
   }
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function createRestoreHarness({
   clientHeight = 600,
   documentPages = 20,
   initialPage = 1,
   initialScrollTop = 0,
+  initialViewReady = true,
+  pagesReady = Promise.resolve(),
   renderedPages = [],
   scrollHeight = 4_000,
 } = {}) {
@@ -78,16 +90,19 @@ function createRestoreHarness({
       return pageViews[index];
     },
     pagesCount: documentPages,
+    pagesPromise: pagesReady,
   };
   const application = {
     appConfig: { mainContainer: container },
     eventBus,
+    isInitialViewSet: initialViewReady,
     pdfDocument: documentIdentity,
     pdfViewer,
   };
   const baselines = [];
   const starts = [];
   const controller = new AbortController();
+  let genuineInteraction = false;
 
   function start(savedPosition) {
     const promise = restorePdfJsPosition({
@@ -95,6 +110,9 @@ function createRestoreHarness({
       container,
       documentIdentity,
       eventBus,
+      interaction: {
+        hasGenuineInteraction: () => genuineInteraction,
+      },
       isCurrent: () => application.pdfDocument === documentIdentity,
       savedPosition,
       scheduler: time.scheduler,
@@ -116,11 +134,15 @@ function createRestoreHarness({
     await drainMicrotasks();
   }
 
+  async function advanceLayoutTurn() {
+    time.advanceBy(16);
+    await drainMicrotasks();
+  }
+
   async function finishLayout() {
-    time.advanceBy(16);
-    await drainMicrotasks();
-    time.advanceBy(16);
-    await drainMicrotasks();
+    await advanceLayoutTurn();
+    await advanceLayoutTurn();
+    await advanceLayoutTurn();
   }
 
   return {
@@ -130,7 +152,11 @@ function createRestoreHarness({
     controller,
     documentIdentity,
     eventBus,
+    advanceLayoutTurn,
     finishLayout,
+    interact() {
+      genuineInteraction = true;
+    },
     navigation,
     render,
     start,
@@ -144,22 +170,72 @@ test("tracked position restores the exact canonical container offset before trac
   const restored = harness.start({ currentPage: 7, scrollTop: 2_345.5 });
   await drainMicrotasks();
 
+  assert.deepEqual(harness.navigation, [], "PDF.js readiness must precede navigation");
+  await harness.advanceLayoutTurn();
   assert.deepEqual(harness.navigation, [7]);
   assert.equal(harness.container.scrollTop, 6_000, "page navigation owns the initial offset");
   assert.deepEqual(harness.starts, [], "tracking must remain disarmed before rendering");
 
   await harness.render(7);
   assert.equal(harness.container.scrollTop, 6_000, "render alone is not layout readiness");
-  harness.time.advanceBy(16);
-  await drainMicrotasks();
+  await harness.advanceLayoutTurn();
   assert.equal(harness.container.scrollTop, 2_345.5);
   assert.deepEqual(harness.starts, [], "tracking waits for the restored scroll to settle");
-  harness.time.advanceBy(16);
+  await harness.advanceLayoutTurn();
   await restored;
 
   assert.deepEqual(harness.starts, [{ currentPage: 7, scrollTop: 2_345.5 }]);
   assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
   assert.equal(harness.eventBus.listenerCount("pagesdestroy"), 0);
+});
+
+test("late PDF.js initial-view changes finish before app-owned restore navigation", async () => {
+  const pages = deferred();
+  const harness = createRestoreHarness({
+    initialViewReady: false,
+    pagesReady: pages.promise,
+  });
+  const restored = harness.start({ currentPage: 7, scrollTop: 700 });
+  await drainMicrotasks();
+
+  assert.deepEqual(harness.navigation, []);
+  harness.application.pdfViewer.currentPageNumber = 2;
+  harness.application.isInitialViewSet = true;
+  harness.eventBus.dispatch("documentinit", { source: harness.application });
+  pages.promise.then(() => {
+    harness.application.pdfViewer.currentPageNumber = 3;
+  });
+  pages.resolve();
+  await drainMicrotasks();
+
+  assert.deepEqual(harness.navigation, [2, 3], "restore waits through both initial views");
+  await harness.advanceLayoutTurn();
+  assert.deepEqual(harness.navigation, [2, 3, 7]);
+  await harness.render(7);
+  await harness.advanceLayoutTurn();
+  await harness.advanceLayoutTurn();
+  await restored;
+  assert.equal(harness.application.pdfViewer.currentPageNumber, 7);
+});
+
+test("pages readiness is bounded for a huge or lazy document", async () => {
+  const pages = deferred();
+  const harness = createRestoreHarness({ pagesReady: pages.promise });
+  const restored = harness.start({ currentPage: 6, scrollTop: 600 });
+  await drainMicrotasks();
+
+  harness.time.advanceBy(9_999);
+  await drainMicrotasks();
+  assert.deepEqual(harness.navigation, []);
+  harness.time.advanceBy(1);
+  await drainMicrotasks();
+  assert.deepEqual(harness.navigation, []);
+  await harness.advanceLayoutTurn();
+  assert.deepEqual(harness.navigation, [6]);
+  await harness.render(6);
+  await harness.advanceLayoutTurn();
+  await harness.advanceLayoutTurn();
+  await restored;
 });
 
 test("page-only and scroll-only saved values are both honored", async (t) => {
@@ -224,26 +300,69 @@ test("a zero viewport safely degrades without applying an offset it cannot honor
   assert.deepEqual(harness.starts, [{ currentPage: 2, scrollTop: 1_000 }]);
 });
 
-test("an immediate handoff-boundary interaction becomes the tracking baseline", async () => {
+test("a genuine interaction before saved scroll application is preserved at handoff", async () => {
   const harness = createRestoreHarness();
   const restored = harness.start({ currentPage: 4, scrollTop: 1_200 });
+  await harness.advanceLayoutTurn();
   await harness.render(4);
-  harness.time.advanceBy(16);
-  await drainMicrotasks();
 
+  harness.interact();
   harness.application.pdfViewer.currentPageNumber = 5;
   harness.container.scrollTop = 2_050;
-  harness.time.advanceBy(16);
+  await harness.advanceLayoutTurn();
+  await restored;
+
+  assert.equal(harness.container.scrollTop, 2_050, "restore must yield to genuine activity");
+  assert.deepEqual(harness.baselines, [{ currentPage: 4, scrollTop: 1_200 }]);
+  assert.deepEqual(harness.starts, [{ currentPage: 5, scrollTop: 2_050 }]);
+});
+
+test("a handoff-boundary interaction is captured by the tracker exactly once", async () => {
+  const harness = createRestoreHarness();
+  const restored = harness.start({ currentPage: 4, scrollTop: 1_200 });
+  await harness.advanceLayoutTurn();
+  await harness.render(4);
+  await harness.advanceLayoutTurn();
+
+  harness.interact();
+  harness.application.pdfViewer.currentPageNumber = 5;
+  harness.container.scrollTop = 2_050;
+  await harness.advanceLayoutTurn();
   await restored;
 
   assert.deepEqual(harness.baselines, [{ currentPage: 4, scrollTop: 1_200 }]);
   assert.deepEqual(harness.starts, [{ currentPage: 5, scrollTop: 2_050 }]);
 });
 
+test("pagerendered must come from the target page and report a successful render", async () => {
+  const harness = createRestoreHarness();
+  const restored = harness.start({ currentPage: 8, scrollTop: 800 });
+  await drainMicrotasks();
+  await harness.advanceLayoutTurn();
+  const wrongPageView = harness.application.pdfViewer.getPageView(0);
+  harness.eventBus.dispatch("pagerendered", {
+    pageNumber: 8,
+    source: wrongPageView,
+  });
+  await drainMicrotasks();
+  assert.deepEqual(harness.starts, [], "an unrelated source cannot satisfy readiness");
+
+  const renderError = new Error("canvas render failed");
+  harness.eventBus.dispatch("pagerendered", {
+    error: renderError,
+    pageNumber: 8,
+    source: harness.application.pdfViewer.getPageView(7),
+  });
+  await assert.rejects(restored, (error) => error === renderError);
+  assert.deepEqual(harness.starts, []);
+  assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
+});
+
 test("document replacement cancels readiness waits and removes stale listeners", async () => {
   const harness = createRestoreHarness();
   const restored = harness.start({ currentPage: 10, scrollTop: 1_000 });
   await drainMicrotasks();
+  await harness.advanceLayoutTurn();
   assert.equal(harness.eventBus.listenerCount("pagerendered"), 1);
 
   harness.application.pdfDocument = { id: "replacement", numPages: 2 };

@@ -4,6 +4,9 @@ import { createPdfJsPositionTracking } from "./pdfjs-position-tracking.mjs";
 import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
 
+const RESTORE_WARNING =
+  "The saved reading position could not be restored. You can keep reading this PDF.";
+
 export async function startViewerApp({
   hostDocument = globalThis.document,
   hostWindow = globalThis.window,
@@ -15,19 +18,24 @@ export async function startViewerApp({
   bootViewerOperation = bootViewer,
   createPositionTracking = createPdfJsPositionTracking,
   createView = createViewerView,
+  positionTrackingScheduler = globalThis,
+  positionTrackingClock = { now: () => Date.now() },
   pdfJsViewerUrl = new URL("./pdfjs/web/viewer.html", import.meta.url),
 } = {}) {
   const frame = hostDocument.querySelector("#pdfViewer");
+  const view = createView({
+    errorPanel: hostDocument.querySelector("#viewerError"),
+    errorMessage: hostDocument.querySelector("#viewerErrorMessage"),
+    frame,
+    warningPanel: hostDocument.querySelector("#viewerWarning"),
+    warningMessage: hostDocument.querySelector("#viewerWarningMessage"),
+  });
   const viewer = await bootViewerOperation({
     search: hostWindow.location.search,
     fetchPdf,
     createObjectUrl,
     pdfJsViewerUrl,
-    view: createView({
-      errorPanel: hostDocument.querySelector("#viewerError"),
-      errorMessage: hostDocument.querySelector("#viewerErrorMessage"),
-      frame,
-    }),
+    view,
   });
 
   if (!viewer) {
@@ -39,9 +47,14 @@ export async function startViewerApp({
     fileUrl: viewer.fileUrl,
     frame,
     hostDocument,
+    clock: positionTrackingClock,
     getBook: getBookOperation,
     updatePosition: positionUpdates.updatePosition,
     handoffPosition: positionUpdates.handoffPosition,
+    reportError(error) {
+      view.showWarning(RESTORE_WARNING, error);
+    },
+    scheduler: positionTrackingScheduler,
   });
   let destroyed = false;
 
