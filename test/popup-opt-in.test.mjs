@@ -49,6 +49,9 @@ function createViewSpy() {
     showError(details) {
       calls.push(["error", details]);
     },
+    showFileAccessInstructions(details) {
+      calls.push(["file-access-instructions", details]);
+    },
     showIneligible() {
       calls.push(["ineligible"]);
     },
@@ -75,6 +78,7 @@ function createViewSpy() {
 
 function createHarness({
   activeTab = { id: TAB_ID, url: BOOK_URL },
+  fileSchemeAccessAllowed = true,
   initialStorage = {},
   now = 1_800_000_000,
 } = {}) {
@@ -89,9 +93,14 @@ function createHarness({
     now: () => now,
   });
   const view = createViewSpy();
+  let fileSchemeAccessChecks = 0;
   let trackCalls = 0;
   const app = createPopupApp({
     view,
+    async isFileSchemeAccessAllowed() {
+      fileSchemeAccessChecks += 1;
+      return fileSchemeAccessAllowed;
+    },
     queryActiveTab: (query) => fake.chrome.tabs.query(query),
     getTab: (tabId) => fake.chrome.tabs.get(tabId),
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
@@ -105,7 +114,18 @@ function createHarness({
     },
     updateCustomTitle: books.updateCustomTitle,
   });
-  return { app, books, fake, get trackCalls() { return trackCalls; }, view };
+  return {
+    app,
+    books,
+    fake,
+    get fileSchemeAccessChecks() {
+      return fileSchemeAccessChecks;
+    },
+    get trackCalls() {
+      return trackCalls;
+    },
+    view,
+  };
 }
 
 function startedTabOperations(fake, method) {
@@ -119,6 +139,23 @@ function startedStorageOperations(fake, method) {
     (operation) => operation.method === method && operation.phase === "start",
   );
 }
+
+test("popup replaces only an untracked PDF action with file access instructions", async () => {
+  const harness = createHarness({ fileSchemeAccessAllowed: false });
+
+  await harness.app.start();
+  await harness.view.activate();
+
+  assert.equal(harness.fileSchemeAccessChecks, 1);
+  assert.deepEqual(harness.view.calls, [
+    ["loading"],
+    ["file-access-instructions", { filename: "A Book" }],
+  ]);
+  assert.equal(startedTabOperations(harness.fake, "query").length, 1);
+  assert.equal(startedStorageOperations(harness.fake, "get").length, 1);
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+});
 
 test("popup open queries the actual active tab and presents an untracked local PDF without side effects", async () => {
   const harness = createHarness();
@@ -174,13 +211,14 @@ test("non-local-PDF tabs show the library without tracking or navigation side ef
 
   for (const [name, activeTab] of cases) {
     await t.test(name, async () => {
-      const harness = createHarness({ activeTab });
+      const harness = createHarness({ activeTab, fileSchemeAccessAllowed: false });
       const originalUrl = activeTab.url;
 
       await harness.app.start();
       await harness.view.activate();
 
       assert.deepEqual(harness.view.calls, [["loading"], ["library", { books: [] }]]);
+      assert.equal(harness.fileSchemeAccessChecks, 0);
       assert.equal(startedStorageOperations(harness.fake, "get").length, 1);
       assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
       assert.equal(startedTabOperations(harness.fake, "update").length, 0);
@@ -192,12 +230,16 @@ test("non-local-PDF tabs show the library without tracking or navigation side ef
 test("another extension's valid viewer URL shows the library without navigation side effects", async () => {
   const otherViewerUrl =
     "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/viewer.html?file=file%3A%2F%2F%2FUsers%2Freader%2FBooks%2FA%2520Book.pdf";
-  const harness = createHarness({ activeTab: { id: TAB_ID, url: otherViewerUrl } });
+  const harness = createHarness({
+    activeTab: { id: TAB_ID, url: otherViewerUrl },
+    fileSchemeAccessAllowed: false,
+  });
 
   await harness.app.start();
   await harness.view.activate();
 
   assert.deepEqual(harness.view.calls, [["loading"], ["library", { books: [] }]]);
+  assert.equal(harness.fileSchemeAccessChecks, 0);
   assert.equal(startedStorageOperations(harness.fake, "get").length, 1);
   assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
   assert.equal(startedTabOperations(harness.fake, "update").length, 0);
@@ -221,9 +263,12 @@ test("canonical encoded filenames use the shared cleaner and hostile text stays 
   assert.doesNotMatch(harness.view.calls.at(-1)[1].filename, /[\p{Cc}\p{Cf}]/u);
 });
 
-test("already tracked PDFs show a bounded truthful state without writing or navigating", async () => {
+test("already tracked PDFs request file access without writing or navigating", async () => {
   const existing = canonicalRecord({ title: "Hydrated title", totalPages: 30 });
-  const harness = createHarness({ initialStorage: { books: { [BOOK_URL]: existing } } });
+  const harness = createHarness({
+    fileSchemeAccessAllowed: false,
+    initialStorage: { books: { [BOOK_URL]: existing } },
+  });
 
   await harness.app.start();
   await harness.app.activate();
@@ -239,9 +284,11 @@ test("already tracked PDFs show a bounded truthful state without writing or navi
         totalPages: 30,
         pagesRemaining: 29,
         progressPercent: 3,
+        fileAccessRequired: true,
       },
     ],
   ]);
+  assert.equal(harness.fileSchemeAccessChecks, 1);
   assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
   assert.equal(startedTabOperations(harness.fake, "update").length, 0);
   assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], existing);
@@ -507,6 +554,30 @@ test("popup teardown suppresses stale rendering while an authorized durable flow
   assert.equal(harness.view.calls.length, callCountBeforeDestroy);
   assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
   assert.equal(startedTabOperations(harness.fake, "update").length, 1);
+});
+
+test("popup view presents step-by-step file access instructions without a tracking action", async () => {
+  const { elements, hostDocument } = createPopupDocumentFake();
+  const view = createPopupView({ hostDocument });
+
+  view.showFileAccessInstructions({ filename: "A Book" });
+
+  assert.equal(elements["#popupMain"].attributes["aria-busy"], "false");
+  assert.equal(elements["#popupStatus"].textContent, "File access required");
+  assert.equal(elements["#popupBook"].hidden, false);
+  assert.equal(elements["#bookFilename"].textContent, "A Book");
+  assert.equal(elements["#fileAccessInstructions"].hidden, false);
+  assert.equal(elements["#trackButton"].hidden, true);
+
+  const popupHtml = await readFile(new URL("../popup/popup.html", import.meta.url), "utf8");
+  assert.match(
+    popupHtml,
+    /<section id="fileAccessInstructions"[^>]+aria-labelledby="fileAccessHeading"[^>]+hidden>/,
+  );
+  assert.match(
+    popupHtml,
+    /<ol>[\s\S]*main menu[\s\S]*Manage extensions[\s\S]*Details[\s\S]*Allow access to file URLs[\s\S]*reopen pdf-resume[\s\S]*<\/ol>/i,
+  );
 });
 
 test("popup view uses native button semantics, accessible state, and text-only hostile filename rendering", async () => {

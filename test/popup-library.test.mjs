@@ -64,6 +64,7 @@ function createHarness({ storage = {} } = {}) {
   const view = createViewSpy();
   const app = createPopupApp({
     view,
+    isFileSchemeAccessAllowed: async () => true,
     queryActiveTab: (query) => fake.chrome.tabs.query(query),
     getTab: (tabId) => fake.chrome.tabs.get(tabId),
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),

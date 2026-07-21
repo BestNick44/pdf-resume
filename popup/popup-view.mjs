@@ -13,6 +13,7 @@ function remainingLabel(pagesRemaining) {
 export function createPopupView({ hostDocument = globalThis.document } = {}) {
   const main = requireElement(hostDocument, "#popupMain");
   const status = requireElement(hostDocument, "#popupStatus");
+  const fileAccessInstructions = requireElement(hostDocument, "#fileAccessInstructions");
   const book = requireElement(hostDocument, "#popupBook");
   const filename = requireElement(hostDocument, "#bookFilename");
   const message = requireElement(hostDocument, "#popupMessage");
@@ -49,6 +50,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
 
   function reset({ busy = false } = {}) {
     main.setAttribute("aria-busy", String(busy));
+    fileAccessInstructions.hidden = true;
     book.hidden = true;
     filename.textContent = "";
     dashboard.hidden = true;
@@ -167,6 +169,13 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       showAction(details.actionLabel);
     },
 
+    showFileAccessInstructions(details = {}) {
+      reset();
+      status.textContent = "File access required";
+      showBook(details);
+      fileAccessInstructions.hidden = false;
+    },
+
     showIneligible() {
       reset();
       status.textContent = "Nothing to track here";
@@ -219,9 +228,11 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
 
     showTracked(details = {}) {
       reset({ busy: details.busy });
-      status.textContent = details.status ?? "Reading progress";
+      status.textContent =
+        details.status ?? (details.fileAccessRequired ? "File access required" : "Reading progress");
       showBook(details);
       dashboard.hidden = false;
+      fileAccessInstructions.hidden = !details.fileAccessRequired;
       pageSummary.textContent = `Page ${details.currentPage} of ${
         details.totalPages > 0 ? details.totalPages : "—"
       }`;

@@ -183,6 +183,7 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   assert.match(popupEntry, /tabs\.query\(query\)/);
   assert.match(popupEntry, /tabs\.get\(tabId\)/);
   assert.match(popupEntry, /tabs\.update\(tabId, updateProperties\)/);
+  assert.match(popupEntry, /extension\.isAllowedFileSchemeAccess\(\)/);
   assert.match(popupEntry, /runtime\.getURL\(path\)/);
   assert.match(popupEntry, /\blistBooks\b/);
   await assertFileExists("popup/popup-app.mjs");
@@ -201,6 +202,7 @@ test("popup and viewer entry points load their app-owned modules", async () => {
     viewerApp,
     /import \{ createPdfJsPositionTracking \} from "\.\/pdfjs-position-tracking\.mjs";/,
   );
+  assert.match(viewerApp, /chrome\.extension\.isAllowedFileSchemeAccess\(\)/);
   assert.match(viewerApp, /createMetadataHydration\(\{/);
   assert.match(viewerApp, /createPositionTracking\(\{/);
   assert.match(viewerApp, /handoffPosition: positionUpdates\.handoffPosition/);
@@ -219,8 +221,12 @@ test("production viewer entry bootstraps the viewer app", async () => {
       "#pdfViewer": { hidden: true, src: "" },
       "#viewerError": { hidden: true },
       "#viewerErrorMessage": { textContent: "" },
+      "#viewerFileAccessInstructions": { hidden: true },
       "#viewerWarning": { hidden: true },
       "#viewerWarningMessage": { textContent: "" },
+    };
+    globalThis.chrome = {
+      extension: { isAllowedFileSchemeAccess: async () => true },
     };
     globalThis.window = { location: { search: "" } };
     globalThis.document = {
@@ -251,6 +257,7 @@ test("production viewer entry bootstraps the viewer app", async () => {
       "#pdfViewer",
       "#viewerError",
       "#viewerErrorMessage",
+      "#viewerFileAccessInstructions",
       "#viewerWarning",
       "#viewerWarningMessage",
     ],
@@ -357,6 +364,7 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
       objectUrlBlobs.push(blob);
       return objectUrl;
     },
+    isFileSchemeAccessAllowed: async () => true,
     pdfJsViewerUrl: new URL(
       "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
     ),
@@ -422,6 +430,7 @@ test("viewer boot presents local input errors without creating or showing a view
         createObjectUrl() {
           objectUrlCalls += 1;
         },
+        isFileSchemeAccessAllowed: async () => true,
         pdfJsViewerUrl: new URL(
           "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
         ),
@@ -447,7 +456,7 @@ test("viewer boot rejects bad signatures and presents local read failures", asyn
   const inputError =
     "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.";
   const readError =
-    "The local PDF could not be read. Enable “Allow access to file URLs” for pdf-resume and verify that the file still exists.";
+    "The local PDF could not be read. Verify that the file still exists and can be opened.";
   const cases = [
     {
       name: "bad PDF signature",
@@ -487,6 +496,7 @@ test("viewer boot rejects bad signatures and presents local read failures", asyn
         createObjectUrl() {
           objectUrlCalls += 1;
         },
+        isFileSchemeAccessAllowed: async () => true,
         pdfJsViewerUrl: new URL(
           "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
         ),
@@ -501,6 +511,43 @@ test("viewer boot rejects bad signatures and presents local read failures", asyn
       assert.equal(errorMessage.textContent, testCase.message);
     });
   }
+});
+
+test("viewer view adapter presents step-by-step file access instructions", async () => {
+  const { createViewerView } = await import("../viewer/viewer-view.mjs");
+  const frame = { hidden: false };
+  const errorPanel = { hidden: false };
+  const errorMessage = { textContent: "Old error" };
+  const fileAccessInstructions = { hidden: true };
+  const warningPanel = { hidden: false };
+  const warningMessage = { textContent: "Old warning" };
+  const view = createViewerView({
+    frame,
+    errorPanel,
+    errorMessage,
+    fileAccessInstructions,
+    warningPanel,
+    warningMessage,
+  });
+
+  view.showFileAccessInstructions();
+
+  assert.equal(frame.hidden, true);
+  assert.equal(errorPanel.hidden, true);
+  assert.equal(errorMessage.textContent, "");
+  assert.equal(fileAccessInstructions.hidden, false);
+  assert.equal(warningPanel.hidden, true);
+  assert.equal(warningMessage.textContent, "");
+
+  const viewerHtml = await readFile(resolveExtensionPath("viewer.html"), "utf8");
+  assert.match(
+    viewerHtml,
+    /<section\s+id="viewerFileAccessInstructions"[^>]+aria-labelledby="viewerFileAccessHeading"[^>]+hidden\s*>/,
+  );
+  assert.match(
+    viewerHtml,
+    /<ol>[\s\S]*main menu[\s\S]*Manage extensions[\s\S]*Details[\s\S]*Allow access to file URLs[\s\S]*reload this page[\s\S]*<\/ol>/i,
+  );
 });
 
 test("viewer view adapter switches between focused viewer and accessible error states", async () => {

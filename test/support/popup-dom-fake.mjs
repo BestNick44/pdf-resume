@@ -1,6 +1,7 @@
 const POPUP_SELECTORS = Object.freeze([
   "#popupMain",
   "#popupStatus",
+  "#fileAccessInstructions",
   "#popupBook",
   "#bookFilename",
   "#popupMessage",

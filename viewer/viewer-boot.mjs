@@ -5,17 +5,23 @@ import {
 } from "./viewer-url.mjs";
 
 const READ_ERROR =
-  "The local PDF could not be read. Enable “Allow access to file URLs” for pdf-resume and verify that the file still exists.";
+  "The local PDF could not be read. Verify that the file still exists and can be opened.";
 
 export async function bootViewer({
   search,
   fetchPdf,
   createObjectUrl,
+  isFileSchemeAccessAllowed,
   pdfJsViewerUrl,
   view,
 }) {
   try {
     const fileUrl = parseViewerFileQuery(search);
+    if (!(await isFileSchemeAccessAllowed())) {
+      view.showFileAccessInstructions();
+      return undefined;
+    }
+
     const response = await fetchPdf(fileUrl.href, {
       cache: "no-store",
       credentials: "omit",

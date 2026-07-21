@@ -16,6 +16,8 @@ export async function startViewerApp({
   fetchPdf = globalThis.fetch,
   createObjectUrl = (blob) => globalThis.URL.createObjectURL(blob),
   revokeObjectUrl = (url) => globalThis.URL.revokeObjectURL(url),
+  isFileSchemeAccessAllowed = () =>
+    globalThis.chrome.extension.isAllowedFileSchemeAccess(),
   sendMessage = (message) => globalThis.chrome.runtime.sendMessage(message),
   getBookOperation = getBook,
   hydrateMetadataOperation = hydrateMetadata,
@@ -32,6 +34,7 @@ export async function startViewerApp({
   const view = createView({
     errorPanel: hostDocument.querySelector("#viewerError"),
     errorMessage: hostDocument.querySelector("#viewerErrorMessage"),
+    fileAccessInstructions: hostDocument.querySelector("#viewerFileAccessInstructions"),
     frame,
     warningPanel: hostDocument.querySelector("#viewerWarning"),
     warningMessage: hostDocument.querySelector("#viewerWarningMessage"),
@@ -40,6 +43,7 @@ export async function startViewerApp({
     search: hostWindow.location.search,
     fetchPdf,
     createObjectUrl,
+    isFileSchemeAccessAllowed,
     pdfJsViewerUrl,
     view,
   });
