@@ -369,6 +369,22 @@ export function createBooksStorage({
       });
     },
 
+    async updateCustomTitle(fileUrl, customTitle) {
+      const canonicalUrl = canonicalFileUrl(fileUrl);
+      validateCustomTitle(customTitle);
+      return mutate(async () => {
+        const books = await loadBooks();
+        const existing = books[canonicalUrl];
+        if (!existing) {
+          return undefined;
+        }
+        const updated = { ...existing, customTitle };
+        books[canonicalUrl] = updated;
+        await storageArea.set({ [BOOKS_KEY]: books });
+        return clone(updated);
+      });
+    },
+
     async removeBook(fileUrl) {
       const canonicalUrl = canonicalFileUrl(fileUrl);
       return mutate(async () => {
@@ -425,6 +441,10 @@ export async function upsertBook(fileUrl, patch) {
 
 export async function hydrateMetadata(fileUrl, patch, options) {
   return defaultStorage().hydrateMetadata(fileUrl, patch, options);
+}
+
+export async function updateCustomTitle(fileUrl, customTitle) {
+  return defaultStorage().updateCustomTitle(fileUrl, customTitle);
 }
 
 export async function removeBook(fileUrl) {

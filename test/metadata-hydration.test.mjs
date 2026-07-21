@@ -384,7 +384,7 @@ test("metadata hydration serializes with concurrent position and rename updates"
     currentPage: 4,
     scrollTop: 700,
   });
-  const renameWrite = renameStore.upsertBook(BOOK_URL, { customTitle: "Renamed" });
+  const renameWrite = renameStore.updateCustomTitle(BOOK_URL, "Renamed");
   heldWrite.release();
   await Promise.all([metadataWrite, positionWrite, renameWrite]);
 

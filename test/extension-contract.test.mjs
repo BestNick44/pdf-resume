@@ -176,7 +176,7 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   assert.match(popup, /<script src="popup-entry\.mjs" type="module"><\/script>/i);
   assert.match(
     popupEntry,
-    /import \{ getBook, trackBook \} from "\.\.\/storage\/books\.mjs";/,
+    /import \{\s+getBook,\s+removeBook,\s+trackBook,\s+updateCustomTitle,\s+\} from "\.\.\/storage\/books\.mjs";/,
   );
   assert.match(popupEntry, /import \{ createPopupApp \} from "\.\/popup-app\.mjs";/);
   assert.match(popupEntry, /import \{ createPopupView \} from "\.\/popup-view\.mjs";/);
@@ -265,6 +265,7 @@ test("shared storage module exposes its API without resolving extension globals 
       "hydrateMetadata",
       "trackBook",
       "upsertBook",
+      "updateCustomTitle",
       "removeBook",
       "listBooks",
       "updatePosition",

@@ -6,6 +6,10 @@ function requireElement(hostDocument, selector) {
   return element;
 }
 
+function remainingLabel(pagesRemaining) {
+  return `${pagesRemaining} ${pagesRemaining === 1 ? "page" : "pages"} remaining`;
+}
+
 export function createPopupView({ hostDocument = globalThis.document } = {}) {
   const main = requireElement(hostDocument, "#popupMain");
   const status = requireElement(hostDocument, "#popupStatus");
@@ -14,16 +18,47 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
   const message = requireElement(hostDocument, "#popupMessage");
   const error = requireElement(hostDocument, "#popupError");
   const action = requireElement(hostDocument, "#trackButton");
+  const dashboard = requireElement(hostDocument, "#trackedDashboard");
+  const pageSummary = requireElement(hostDocument, "#pageSummary");
+  const pagesRemaining = requireElement(hostDocument, "#pagesRemaining");
+  const progress = requireElement(hostDocument, "#progressBar");
+  const progressPercent = requireElement(hostDocument, "#progressPercent");
+  const renameForm = requireElement(hostDocument, "#renameForm");
+  const customTitle = requireElement(hostDocument, "#customTitle");
+  const renameButton = requireElement(hostDocument, "#renameButton");
+  const untrackButton = requireElement(hostDocument, "#untrackButton");
   let activationHandler;
+  let renameHandler;
+  let untrackHandler;
 
   function onActivate() {
     activationHandler?.();
+  }
+
+  function onRename(event) {
+    event.preventDefault();
+    renameHandler?.(customTitle.value);
+  }
+
+  function onUntrack() {
+    untrackHandler?.();
   }
 
   function reset({ busy = false } = {}) {
     main.setAttribute("aria-busy", String(busy));
     book.hidden = true;
     filename.textContent = "";
+    dashboard.hidden = true;
+    pageSummary.textContent = "";
+    pagesRemaining.textContent = "";
+    progress.hidden = false;
+    progress.max = 100;
+    progress.value = 0;
+    progressPercent.textContent = "";
+    customTitle.value = "";
+    customTitle.disabled = busy;
+    renameButton.disabled = busy;
+    untrackButton.disabled = busy;
     message.hidden = true;
     message.textContent = "";
     error.hidden = true;
@@ -35,7 +70,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
 
   function showBook(details = {}) {
     book.hidden = false;
-    filename.textContent = details.filename ?? "";
+    filename.textContent = details.title ?? details.filename ?? "";
   }
 
   function showAction(label) {
@@ -48,15 +83,29 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
   }
 
   action.addEventListener("click", onActivate);
+  renameForm.addEventListener("submit", onRename);
+  untrackButton.addEventListener("click", onUntrack);
 
   return Object.freeze({
     destroy() {
       activationHandler = undefined;
+      renameHandler = undefined;
+      untrackHandler = undefined;
       action.removeEventListener("click", onActivate);
+      renameForm.removeEventListener("submit", onRename);
+      untrackButton.removeEventListener("click", onUntrack);
     },
 
     setActivationHandler(handler) {
       activationHandler = handler;
+    },
+
+    setRenameHandler(handler) {
+      renameHandler = handler;
+    },
+
+    setUntrackHandler(handler) {
+      untrackHandler = handler;
     },
 
     showError(details = {}) {
@@ -88,6 +137,14 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       showBook(details);
     },
 
+    showRemoved(details = {}) {
+      reset();
+      status.textContent = "Book untracked";
+      showBook(details);
+      message.textContent = details.message ?? "This book is no longer tracked.";
+      message.hidden = false;
+    },
+
     showSuccess(details = {}) {
       reset();
       status.textContent = details.message ?? "Book tracked.";
@@ -95,11 +152,27 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     },
 
     showTracked(details = {}) {
-      reset();
-      status.textContent = "Already tracked";
+      reset({ busy: details.busy });
+      status.textContent = details.status ?? "Reading progress";
       showBook(details);
-      message.textContent = details.message ?? "This book is already tracked.";
-      message.hidden = false;
+      dashboard.hidden = false;
+      pageSummary.textContent = `Page ${details.currentPage} of ${
+        details.totalPages > 0 ? details.totalPages : "—"
+      }`;
+      if (details.totalPages > 0) {
+        pagesRemaining.textContent = remainingLabel(details.pagesRemaining);
+        progress.value = details.progressPercent;
+        progressPercent.textContent = `${details.progressPercent}%`;
+      } else {
+        pagesRemaining.textContent = "Page count unavailable";
+        progress.hidden = true;
+        progressPercent.textContent = "Progress unavailable";
+      }
+      customTitle.value = details.customTitle ?? "";
+      if (details.error) {
+        error.textContent = details.error;
+        error.hidden = false;
+      }
     },
 
     showUntracked(details = {}) {

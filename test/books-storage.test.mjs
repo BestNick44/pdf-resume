@@ -7,6 +7,7 @@ import {
   listBooks,
   removeBook,
   trackBook,
+  updateCustomTitle,
   updatePosition,
   upsertBook,
 } from "../storage/books.mjs";
@@ -350,6 +351,26 @@ test("invalid URLs and patch values are rejected before storage access", async (
   }
 });
 
+test("custom title updates support clearing and validate before storage access", async () => {
+  const existing = canonicalRecord({ customTitle: "Reader name" });
+  const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
+  const books = createTestBooksStorage(fake);
+
+  assert.deepEqual(await books.updateCustomTitle(BOOK_A, null), {
+    ...existing,
+    customTitle: null,
+  });
+
+  const invalidFake = createChromeStorageFake();
+  const invalidBooks = createTestBooksStorage(invalidFake);
+  await assert.rejects(() => invalidBooks.updateCustomTitle(BOOK_A, undefined), /customTitle/i);
+  await assert.rejects(
+    () => invalidBooks.updateCustomTitle("https://example.test/book.pdf", "Name"),
+    /local file/i,
+  );
+  assert.deepEqual(invalidFake.operations, []);
+});
+
 test("position patches reject invalid shapes before storage access", async () => {
   const invalidPatches = [
     {},
@@ -493,6 +514,75 @@ test("cross-context lock preserves simultaneous updates to distinct books", asyn
   assert.equal(fake.snapshot().books[BOOK_B].title, "B");
 });
 
+test("custom title updates preserve all latest fields under the cross-context lock", async () => {
+  const existing = canonicalRecord({ customTitle: null });
+  const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
+  const viewerStore = createTestBooksStorage(fake, 1_800_000_001);
+  const popupStore = createTestBooksStorage(fake, 1_800_000_002);
+  const heldWrite = fake.holdNext("set");
+
+  const positionWrite = viewerStore.updatePosition(BOOK_A, {
+    currentPage: 20,
+    scrollTop: 900,
+  });
+  await heldWrite.started;
+  const renameWrite = popupStore.updateCustomTitle(BOOK_A, "Renamed");
+  heldWrite.release();
+
+  assert.deepEqual(await renameWrite, {
+    ...existing,
+    customTitle: "Renamed",
+    currentPage: 20,
+    scrollTop: 900,
+    lastReadAt: 1_800_000_001,
+  });
+  await positionWrite;
+  assert.deepEqual(fake.snapshot().books[BOOK_A], {
+    ...existing,
+    customTitle: "Renamed",
+    currentPage: 20,
+    scrollTop: 900,
+    lastReadAt: 1_800_000_001,
+  });
+});
+
+test("custom title updates queued after or performed after untrack never recreate the book", async (t) => {
+  await t.test("performed after untrack", async () => {
+    const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
+    const books = createTestBooksStorage(fake);
+
+    assert.equal(await books.removeBook(BOOK_A), true);
+    const writesAfterUntrack = fake.operations.filter(({ method }) => method === "set").length;
+
+    assert.equal(await books.updateCustomTitle(BOOK_A, "Renamed"), undefined);
+    assert.deepEqual(fake.snapshot(), { books: {} });
+    assert.equal(
+      fake.operations.filter(({ method }) => method === "set").length,
+      writesAfterUntrack,
+    );
+  });
+
+  await t.test("queued after untrack", async () => {
+    const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
+    const untrackStore = createTestBooksStorage(fake);
+    const renameStore = createTestBooksStorage(fake);
+    const heldWrite = fake.holdNext("set");
+
+    const untrack = untrackStore.removeBook(BOOK_A);
+    await heldWrite.started;
+    const rename = renameStore.updateCustomTitle(BOOK_A, "Renamed");
+    heldWrite.release();
+
+    assert.equal(await untrack, true);
+    assert.equal(await rename, undefined);
+    assert.deepEqual(fake.snapshot(), { books: {} });
+    assert.equal(
+      fake.operations.filter(({ method, phase }) => method === "set" && phase === "start").length,
+      1,
+    );
+  });
+});
+
 test("cross-context lock preserves simultaneous partial updates to the same book", async () => {
   const existing = canonicalRecord({ customTitle: null });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
@@ -566,10 +656,12 @@ test("top-level API resolves Chrome dependencies lazily in extension contexts", 
     assert.deepEqual(await getBook(BOOK_A), created);
     const updated = await upsertBook(BOOK_A, { title: "Updated" });
     assert.deepEqual(updated, { ...created, title: "Updated" });
-    assert.deepEqual(await listBooks(), [{ fileUrl: BOOK_A, book: updated }]);
+    const renamed = await updateCustomTitle(BOOK_A, "Reader name");
+    assert.deepEqual(renamed, { ...updated, customTitle: "Reader name" });
+    assert.deepEqual(await listBooks(), [{ fileUrl: BOOK_A, book: renamed }]);
     assert.deepEqual(
       await updatePosition(BOOK_A, { currentPage: 2, scrollTop: 10 }),
-      { ...updated, currentPage: 2, scrollTop: 10 },
+      { ...renamed, currentPage: 2, scrollTop: 10 },
     );
     assert.equal(await removeBook(BOOK_A), true);
   } finally {

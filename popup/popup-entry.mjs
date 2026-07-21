@@ -1,4 +1,9 @@
-import { getBook, trackBook } from "../storage/books.mjs";
+import {
+  getBook,
+  removeBook,
+  trackBook,
+  updateCustomTitle,
+} from "../storage/books.mjs";
 import { createPopupApp } from "./popup-app.mjs";
 import { createPopupView } from "./popup-view.mjs";
 
@@ -10,7 +15,9 @@ const app = createPopupApp({
   updateTab: (tabId, updateProperties) => tabs.update(tabId, updateProperties),
   getRuntimeUrl: (path) => runtime.getURL(path),
   getBook,
+  removeBook,
   trackBook,
+  updateCustomTitle,
   view: createPopupView(),
 });
 

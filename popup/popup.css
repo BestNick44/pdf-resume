@@ -6,7 +6,7 @@
 body {
   box-sizing: border-box;
   margin: 0;
-  min-width: 20rem;
+  min-width: 22rem;
   background: Canvas;
   color: CanvasText;
 }
@@ -23,7 +23,7 @@ h1 {
 h2 {
   margin: 0.75rem 0 0;
   overflow-wrap: anywhere;
-  font-size: 1rem;
+  font-size: 1.05rem;
 }
 
 p {
@@ -35,17 +35,71 @@ p {
   font-weight: 650;
 }
 
-button {
-  margin-top: 1rem;
+button,
+input {
   min-height: 2.5rem;
-  padding: 0.5rem 0.875rem;
   border: 1px solid ButtonBorder;
   border-radius: 0.35rem;
+  font: inherit;
+}
+
+button {
+  margin-top: 1rem;
+  padding: 0.5rem 0.875rem;
   background: ButtonFace;
   color: ButtonText;
-  font: inherit;
   font-weight: 650;
   cursor: pointer;
+}
+
+#trackedDashboard {
+  margin-top: 0.75rem;
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+progress {
+  flex: 1;
+  min-width: 0;
+  accent-color: AccentColor;
+}
+
+#progressPercent {
+  min-width: 3ch;
+  font-weight: 650;
+  text-align: right;
+}
+
+form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.4rem 0.5rem;
+  margin-top: 1rem;
+}
+
+label {
+  grid-column: 1 / -1;
+  font-weight: 650;
+}
+
+input {
+  min-width: 0;
+  padding: 0.35rem 0.5rem;
+  background: Field;
+  color: FieldText;
+}
+
+#renameButton {
+  margin-top: 0;
+}
+
+#untrackButton {
+  width: 100%;
 }
 
 button:focus-visible {

@@ -6,6 +6,7 @@ import { createPopupApp } from "../popup/popup-app.mjs";
 import { createPopupView } from "../popup/popup-view.mjs";
 import { createBooksStorage } from "../storage/books.mjs";
 import { createChromeExtensionFake } from "./support/chrome-extension-fake.mjs";
+import { createPopupDocumentFake } from "./support/popup-dom-fake.mjs";
 
 const BOOK_URL = "file:///Users/reader/Books/A%20Book.pdf";
 const TAB_ID = 7;
@@ -39,6 +40,8 @@ function createViewSpy() {
     setActivationHandler(handler) {
       activationHandler = handler;
     },
+    setRenameHandler() {},
+    setUntrackHandler() {},
     activate() {
       return activationHandler?.();
     },
@@ -90,10 +93,12 @@ function createHarness({
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
     getRuntimeUrl: (path) => fake.chrome.runtime.getURL(path),
     getBook: books.getBook,
+    removeBook: books.removeBook,
     async trackBook(...args) {
       trackCalls += 1;
       return books.trackBook(...args);
     },
+    updateCustomTitle: books.updateCustomTitle,
   });
   return { app, books, fake, get trackCalls() { return trackCalls; }, view };
 }
@@ -164,6 +169,20 @@ test("only canonical local PDF tabs are eligible and unrelated tabs remain stabl
   }
 });
 
+test("another extension's valid viewer URL is ineligible without storage or navigation side effects", async () => {
+  const otherViewerUrl =
+    "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/viewer.html?file=file%3A%2F%2F%2FUsers%2Freader%2FBooks%2FA%2520Book.pdf";
+  const harness = createHarness({ activeTab: { id: TAB_ID, url: otherViewerUrl } });
+
+  await harness.app.start();
+  await harness.view.activate();
+
+  assert.deepEqual(harness.view.calls, [["loading"], ["ineligible"]]);
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+  assert.equal(harness.fake.snapshotTab(TAB_ID).url, otherViewerUrl);
+});
+
 test("canonical encoded filenames use the shared cleaner and hostile text stays data", async () => {
   const hostileUrl =
     "file:///tmp/%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E_%E6%97%A5%E6%9C%AC%E8%AA%9E%0A---Final%2Epdf";
@@ -190,7 +209,17 @@ test("already tracked PDFs show a bounded truthful state without writing or navi
 
   assert.deepEqual(harness.view.calls, [
     ["loading"],
-    ["tracked", { filename: "A Book", message: "This book is already tracked." }],
+    [
+      "tracked",
+      {
+        title: "Hydrated title",
+        customTitle: null,
+        currentPage: 1,
+        totalPages: 30,
+        pagesRemaining: 29,
+        progressPercent: 3,
+      },
+    ],
   ]);
   assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
   assert.equal(startedTabOperations(harness.fake, "update").length, 0);
@@ -459,54 +488,9 @@ test("popup teardown suppresses stale rendering while an authorized durable flow
   assert.equal(startedTabOperations(harness.fake, "update").length, 1);
 });
 
-class FakeElement {
-  constructor() {
-    this.attributes = {};
-    this.disabled = false;
-    this.hidden = false;
-    this.listeners = new Map();
-    this.textContent = "";
-  }
-
-  set innerHTML(_value) {
-    assert.fail("popup rendering must not use HTML parsing");
-  }
-
-  addEventListener(type, listener) {
-    this.listeners.set(type, listener);
-  }
-
-  removeEventListener(type, listener) {
-    if (this.listeners.get(type) === listener) {
-      this.listeners.delete(type);
-    }
-  }
-
-  setAttribute(name, value) {
-    this.attributes[name] = value;
-  }
-
-  click() {
-    if (!this.disabled && !this.hidden) {
-      this.listeners.get("click")?.({ type: "click" });
-    }
-  }
-}
-
 test("popup view uses native button semantics, accessible state, and text-only hostile filename rendering", async () => {
-  const selectors = [
-    "#popupMain",
-    "#popupStatus",
-    "#popupBook",
-    "#bookFilename",
-    "#popupMessage",
-    "#popupError",
-    "#trackButton",
-  ];
-  const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
-  const view = createPopupView({
-    hostDocument: { querySelector: (selector) => elements[selector] },
-  });
+  const { elements, hostDocument } = createPopupDocumentFake();
+  const view = createPopupView({ hostDocument });
   let activations = 0;
   view.setActivationHandler(() => {
     activations += 1;

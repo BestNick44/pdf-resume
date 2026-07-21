@@ -13,6 +13,20 @@
       <p id="popupStatus" class="status" role="status" aria-live="polite">Checking the active tab…</p>
       <section id="popupBook" aria-labelledby="bookFilename" hidden>
         <h2 id="bookFilename"></h2>
+        <div id="trackedDashboard" hidden>
+          <p id="pageSummary"></p>
+          <p id="pagesRemaining"></p>
+          <div class="progress-row">
+            <progress id="progressBar" aria-label="Reading progress" max="100" value="0"></progress>
+            <span id="progressPercent"></span>
+          </div>
+          <form id="renameForm">
+            <label for="customTitle">Custom title</label>
+            <input id="customTitle" name="customTitle" type="text" autocomplete="off">
+            <button id="renameButton" type="submit">Save title</button>
+          </form>
+          <button id="untrackButton" type="button">Untrack</button>
+        </div>
       </section>
       <p id="popupMessage" hidden></p>
       <p id="popupError" role="alert" hidden></p>
