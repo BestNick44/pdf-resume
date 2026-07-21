@@ -147,7 +147,7 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   }
 });
 
-test("background entry registers the private ordered position-update handler", async () => {
+test("background entry registers navigation and private ordered position-update handlers", async () => {
   const manifest = await readManifest();
   const workerPath = resolveExtensionPath(manifest.background.service_worker);
   const worker = await readFile(workerPath, "utf8");
@@ -158,8 +158,9 @@ test("background entry registers the private ordered position-update handler", a
     worker,
     /import \{ createPositionUpdateMessageHandler \} from "\.\/shared\/position-update-messaging\.mjs";/,
   );
-  assert.match(worker, /import \{ updatePosition \} from "\.\/storage\/books\.mjs";/);
+  assert.match(worker, /import \{ getBook, updatePosition \} from "\.\/storage\/books\.mjs";/);
   assert.match(worker, /runtime\.onMessage\.addListener/);
+  assert.match(worker, /onBeforeNavigate\.addListener/);
   assert.match(worker, /createPositionUpdateMessageHandler\(\{ extensionId: runtime\.id, updatePosition \}\)/);
   await assertFileExists("shared/position-update-messaging.mjs");
   await assertFileExists("storage/books.mjs");
