@@ -27,7 +27,10 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
   const customTitle = requireElement(hostDocument, "#customTitle");
   const renameButton = requireElement(hostDocument, "#renameButton");
   const untrackButton = requireElement(hostDocument, "#untrackButton");
+  const library = requireElement(hostDocument, "#popupLibrary");
+  const libraryList = requireElement(hostDocument, "#libraryList");
   let activationHandler;
+  let openBookHandler;
   let renameHandler;
   let untrackHandler;
 
@@ -59,6 +62,8 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     customTitle.disabled = busy;
     renameButton.disabled = busy;
     untrackButton.disabled = busy;
+    library.hidden = true;
+    libraryList.replaceChildren();
     message.hidden = true;
     message.textContent = "";
     error.hidden = true;
@@ -82,6 +87,44 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     action.hidden = false;
   }
 
+  function createLibraryBook(details, busy) {
+    const item = hostDocument.createElement("li");
+    const button = hostDocument.createElement("button");
+    const title = hostDocument.createElement("span");
+    const summary = hostDocument.createElement("span");
+    const progressRow = hostDocument.createElement("span");
+    const progress = hostDocument.createElement("progress");
+    const progressLabel = hostDocument.createElement("span");
+    const summaryText = `Page ${details.currentPage} of ${
+      details.totalPages > 0 ? details.totalPages : "—"
+    }`;
+
+    item.className = "library-book";
+    button.className = "library-book-button";
+    button.type = "button";
+    button.disabled = busy;
+    button.setAttribute("aria-label", `Open ${details.title}, ${summaryText}`);
+    button.addEventListener("click", () => openBookHandler?.(details.fileUrl));
+    title.className = "library-book-title";
+    title.textContent = details.title;
+    summary.className = "library-book-summary";
+    summary.textContent = summaryText;
+    progressRow.className = "progress-row";
+    progress.max = 100;
+    progress.setAttribute("aria-label", `Reading progress for ${details.title}`);
+    if (details.progressPercent === null) {
+      progressLabel.textContent = "Progress unavailable";
+    } else {
+      progress.value = details.progressPercent;
+      progressLabel.textContent = `${details.progressPercent}%`;
+    }
+
+    progressRow.append(progress, progressLabel);
+    button.append(title, summary);
+    item.append(button, progressRow);
+    return item;
+  }
+
   action.addEventListener("click", onActivate);
   renameForm.addEventListener("submit", onRename);
   untrackButton.addEventListener("click", onUntrack);
@@ -89,6 +132,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
   return Object.freeze({
     destroy() {
       activationHandler = undefined;
+      openBookHandler = undefined;
       renameHandler = undefined;
       untrackHandler = undefined;
       action.removeEventListener("click", onActivate);
@@ -98,6 +142,10 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
 
     setActivationHandler(handler) {
       activationHandler = handler;
+    },
+
+    setOpenBookHandler(handler) {
+      openBookHandler = handler;
     },
 
     setRenameHandler(handler) {
@@ -124,6 +172,24 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       status.textContent = "Nothing to track here";
       message.textContent = "Open an untracked local PDF to track it.";
       message.hidden = false;
+    },
+
+    showLibrary(details = {}) {
+      const books = details.books ?? [];
+      reset({ busy: details.busy });
+      status.textContent = details.status ?? "Your library";
+      library.hidden = false;
+      libraryList.replaceChildren(
+        ...books.map((bookDetails) => createLibraryBook(bookDetails, details.busy)),
+      );
+      if (books.length === 0) {
+        message.textContent = "No tracked books yet. Open a local PDF to add one.";
+        message.hidden = false;
+      }
+      if (details.error) {
+        error.textContent = details.error;
+        error.hidden = false;
+      }
     },
 
     showLoading() {

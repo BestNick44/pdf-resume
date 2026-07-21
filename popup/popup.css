@@ -56,6 +56,51 @@ button {
   margin-top: 0.75rem;
 }
 
+#popupLibrary {
+  margin-top: 1rem;
+}
+
+#libraryList {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.library-book {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid ButtonBorder;
+  border-radius: 0.35rem;
+}
+
+.library-book-button {
+  display: grid;
+  gap: 0.35rem;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.library-book .progress-row {
+  margin-top: 0;
+}
+
+.library-book-title {
+  overflow-wrap: anywhere;
+  font-weight: 650;
+}
+
+.library-book-summary {
+  font-weight: 400;
+}
+
 .progress-row {
   display: flex;
   align-items: center;

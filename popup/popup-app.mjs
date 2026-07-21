@@ -48,6 +48,12 @@ function candidateFromTabs(tabs, getRuntimeUrl) {
   };
 }
 
+function progressPercent(book) {
+  return book.totalPages > 0
+    ? Math.min(Math.round((book.currentPage / book.totalPages) * 100), 100)
+    : null;
+}
+
 function trackedBookDetails(book, status = {}) {
   const hasKnownTotal = book.totalPages > 0;
   return {
@@ -56,10 +62,18 @@ function trackedBookDetails(book, status = {}) {
     currentPage: book.currentPage,
     totalPages: book.totalPages,
     pagesRemaining: hasKnownTotal ? Math.max(book.totalPages - book.currentPage, 0) : null,
-    progressPercent: hasKnownTotal
-      ? Math.min(Math.round((book.currentPage / book.totalPages) * 100), 100)
-      : null,
+    progressPercent: progressPercent(book),
     ...status,
+  };
+}
+
+function libraryBookDetails({ fileUrl, book }) {
+  return {
+    fileUrl,
+    title: book.customTitle ?? book.title,
+    currentPage: book.currentPage,
+    totalPages: book.totalPages,
+    progressPercent: progressPercent(book),
   };
 }
 
@@ -88,6 +102,7 @@ export function createPopupApp({
   updateTab,
   getRuntimeUrl,
   getBook,
+  listBooks,
   removeBook,
   trackBook,
   updateCustomTitle,
@@ -99,6 +114,7 @@ export function createPopupApp({
     typeof updateTab !== "function" ||
     typeof getRuntimeUrl !== "function" ||
     typeof getBook !== "function" ||
+    typeof listBooks !== "function" ||
     typeof removeBook !== "function" ||
     typeof trackBook !== "function" ||
     typeof updateCustomTitle !== "function" ||
@@ -110,6 +126,8 @@ export function createPopupApp({
   let candidate;
   let canActivate = false;
   let destroyed = false;
+  let libraryBooks;
+  let libraryTabId;
   let pending;
   let started = false;
   let trackedBook;
@@ -256,6 +274,42 @@ export function createPopupApp({
     return pending;
   }
 
+  async function runOpenBook(book) {
+    render("showLibrary", {
+      books: libraryBooks,
+      busy: true,
+      status: `Opening ${book.title}…`,
+    });
+    try {
+      const viewerPath = `viewer.html?file=${encodeURIComponent(book.fileUrl)}`;
+      const openedTab = await updateTab(libraryTabId, { url: getRuntimeUrl(viewerPath) });
+      if (openedTab === undefined) {
+        throw new Error("the tracked book could not be opened in the viewer");
+      }
+      render("showLibrary", {
+        books: libraryBooks,
+        status: `Opening ${book.title} in the viewer…`,
+      });
+    } catch {
+      render("showLibrary", {
+        books: libraryBooks,
+        error: `${book.title} could not be opened. Try again.`,
+        status: "Unable to open book",
+      });
+    }
+  }
+
+  function openBook(fileUrl) {
+    const book = libraryBooks?.find((entry) => entry.fileUrl === fileUrl);
+    if (!book || pending || destroyed) {
+      return pending;
+    }
+    pending = runOpenBook(book).finally(() => {
+      pending = undefined;
+    });
+    return pending;
+  }
+
   async function start() {
     if (started || destroyed) {
       return;
@@ -264,9 +318,17 @@ export function createPopupApp({
     render("showLoading");
 
     try {
-      candidate = candidateFromTabs(await queryActiveTab(ACTIVE_TAB_QUERY), getRuntimeUrl);
+      const tabs = await queryActiveTab(ACTIVE_TAB_QUERY);
+      candidate = candidateFromTabs(tabs, getRuntimeUrl);
       if (!candidate) {
-        render("showIneligible");
+        const [activeTab] = Array.isArray(tabs) ? tabs : [];
+        if (!Number.isInteger(activeTab?.id)) {
+          render("showIneligible");
+          return;
+        }
+        libraryBooks = (await listBooks()).map(libraryBookDetails);
+        libraryTabId = activeTab.id;
+        render("showLibrary", { books: libraryBooks });
         return;
       }
 
@@ -299,7 +361,8 @@ export function createPopupApp({
   }
 
   view.setActivationHandler(activate);
+  view.setOpenBookHandler(openBook);
   view.setRenameHandler(rename);
   view.setUntrackHandler(untrack);
-  return Object.freeze({ activate, destroy, rename, start, untrack });
+  return Object.freeze({ activate, destroy, openBook, rename, start, untrack });
 }
