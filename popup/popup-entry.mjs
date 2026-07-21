@@ -1,5 +1,6 @@
 import {
   getBook,
+  listBooks,
   removeBook,
   trackBook,
   updateCustomTitle,
@@ -15,6 +16,7 @@ const app = createPopupApp({
   updateTab: (tabId, updateProperties) => tabs.update(tabId, updateProperties),
   getRuntimeUrl: (path) => runtime.getURL(path),
   getBook,
+  listBooks,
   removeBook,
   trackBook,
   updateCustomTitle,

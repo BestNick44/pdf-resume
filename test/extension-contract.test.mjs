@@ -176,7 +176,7 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   assert.match(popup, /<script src="popup-entry\.mjs" type="module"><\/script>/i);
   assert.match(
     popupEntry,
-    /import \{\s+getBook,\s+removeBook,\s+trackBook,\s+updateCustomTitle,\s+\} from "\.\.\/storage\/books\.mjs";/,
+    /import \{\s+getBook,\s+listBooks,\s+removeBook,\s+trackBook,\s+updateCustomTitle,\s+\} from "\.\.\/storage\/books\.mjs";/,
   );
   assert.match(popupEntry, /import \{ createPopupApp \} from "\.\/popup-app\.mjs";/);
   assert.match(popupEntry, /import \{ createPopupView \} from "\.\/popup-view\.mjs";/);
@@ -184,6 +184,7 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   assert.match(popupEntry, /tabs\.get\(tabId\)/);
   assert.match(popupEntry, /tabs\.update\(tabId, updateProperties\)/);
   assert.match(popupEntry, /runtime\.getURL\(path\)/);
+  assert.match(popupEntry, /\blistBooks\b/);
   await assertFileExists("popup/popup-app.mjs");
   await assertFileExists("popup/popup-view.mjs");
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);

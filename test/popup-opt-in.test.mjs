@@ -40,6 +40,7 @@ function createViewSpy() {
     setActivationHandler(handler) {
       activationHandler = handler;
     },
+    setOpenBookHandler() {},
     setRenameHandler() {},
     setUntrackHandler() {},
     activate() {
@@ -50,6 +51,9 @@ function createViewSpy() {
     },
     showIneligible() {
       calls.push(["ineligible"]);
+    },
+    showLibrary(details) {
+      calls.push(["library", details]);
     },
     showLoading() {
       calls.push(["loading"]);
@@ -93,6 +97,7 @@ function createHarness({
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
     getRuntimeUrl: (path) => fake.chrome.runtime.getURL(path),
     getBook: books.getBook,
+    listBooks: books.listBooks,
     removeBook: books.removeBook,
     async trackBook(...args) {
       trackCalls += 1;
@@ -135,11 +140,28 @@ test("popup open queries the actual active tab and presents an untracked local P
   assert.equal(startedTabOperations(harness.fake, "update").length, 0);
 });
 
-test("only canonical local PDF tabs are eligible and unrelated tabs remain stable", async (t) => {
-  const cases = [
+test("tabs without an accessible tab id remain ineligible without side effects", async (t) => {
+  for (const [name, activeTab] of [
     ["no active tab", null],
-    ["inaccessible URL", { id: TAB_ID }],
     ["inaccessible id", { url: BOOK_URL }],
+  ]) {
+    await t.test(name, async () => {
+      const harness = createHarness({ activeTab });
+
+      await harness.app.start();
+      await harness.view.activate();
+
+      assert.deepEqual(harness.view.calls, [["loading"], ["ineligible"]]);
+      assert.equal(startedStorageOperations(harness.fake, "get").length, 0);
+      assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+      assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+    });
+  }
+});
+
+test("non-local-PDF tabs show the library without tracking or navigation side effects", async (t) => {
+  const cases = [
+    ["inaccessible URL", { id: TAB_ID }],
     ["remote PDF", { id: TAB_ID, url: "https://example.test/book.pdf" }],
     ["HTTP PDF", { id: TAB_ID, url: "http://example.test/book.pdf" }],
     ["extension viewer", { id: TAB_ID, url: "chrome-extension://id/viewer.html?file=x" }],
@@ -153,23 +175,21 @@ test("only canonical local PDF tabs are eligible and unrelated tabs remain stabl
   for (const [name, activeTab] of cases) {
     await t.test(name, async () => {
       const harness = createHarness({ activeTab });
-      const originalUrl = activeTab?.url;
+      const originalUrl = activeTab.url;
 
       await harness.app.start();
       await harness.view.activate();
 
-      assert.deepEqual(harness.view.calls, [["loading"], ["ineligible"]]);
-      assert.equal(startedStorageOperations(harness.fake, "get").length, 0);
+      assert.deepEqual(harness.view.calls, [["loading"], ["library", { books: [] }]]);
+      assert.equal(startedStorageOperations(harness.fake, "get").length, 1);
       assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
       assert.equal(startedTabOperations(harness.fake, "update").length, 0);
-      if (activeTab?.id) {
-        assert.equal(harness.fake.snapshotTab(activeTab.id)?.url, originalUrl);
-      }
+      assert.equal(harness.fake.snapshotTab(activeTab.id)?.url, originalUrl);
     });
   }
 });
 
-test("another extension's valid viewer URL is ineligible without storage or navigation side effects", async () => {
+test("another extension's valid viewer URL shows the library without navigation side effects", async () => {
   const otherViewerUrl =
     "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/viewer.html?file=file%3A%2F%2F%2FUsers%2Freader%2FBooks%2FA%2520Book.pdf";
   const harness = createHarness({ activeTab: { id: TAB_ID, url: otherViewerUrl } });
@@ -177,7 +197,8 @@ test("another extension's valid viewer URL is ineligible without storage or navi
   await harness.app.start();
   await harness.view.activate();
 
-  assert.deepEqual(harness.view.calls, [["loading"], ["ineligible"]]);
+  assert.deepEqual(harness.view.calls, [["loading"], ["library", { books: [] }]]);
+  assert.equal(startedStorageOperations(harness.fake, "get").length, 1);
   assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
   assert.equal(startedTabOperations(harness.fake, "update").length, 0);
   assert.equal(harness.fake.snapshotTab(TAB_ID).url, otherViewerUrl);

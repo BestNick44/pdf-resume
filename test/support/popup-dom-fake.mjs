@@ -15,16 +15,22 @@ const POPUP_SELECTORS = Object.freeze([
   "#customTitle",
   "#renameButton",
   "#untrackButton",
+  "#popupLibrary",
+  "#libraryList",
 ]);
 
 class FakePopupElement {
-  constructor() {
+  constructor(tagName = "div") {
     this.attributes = {};
+    this.children = [];
+    this.className = "";
     this.disabled = false;
     this.hidden = false;
     this.listeners = new Map();
     this.max = 0;
+    this.tagName = tagName.toUpperCase();
     this.textContent = "";
+    this.type = "";
     this.value = "";
   }
 
@@ -36,10 +42,18 @@ class FakePopupElement {
     this.listeners.set(type, listener);
   }
 
+  append(...children) {
+    this.children.push(...children);
+  }
+
   removeEventListener(type, listener) {
     if (this.listeners.get(type) === listener) {
       this.listeners.delete(type);
     }
+  }
+
+  replaceChildren(...children) {
+    this.children = [...children];
   }
 
   setAttribute(name, value) {
@@ -70,6 +84,9 @@ export function createPopupDocumentFake() {
   );
   return {
     elements,
-    hostDocument: { querySelector: (selector) => elements[selector] },
+    hostDocument: {
+      createElement: (tagName) => new FakePopupElement(tagName),
+      querySelector: (selector) => elements[selector],
+    },
   };
 }

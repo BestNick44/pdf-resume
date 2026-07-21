@@ -36,6 +36,7 @@ function createViewSpy() {
       return renameHandler?.(customTitle);
     },
     setActivationHandler() {},
+    setOpenBookHandler() {},
     setRenameHandler(handler) {
       renameHandler = handler;
     },
@@ -82,6 +83,7 @@ function createHarness({ book = canonicalRecord(), tabUrl = VIEWER_URL } = {}) {
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
     getRuntimeUrl: (path) => fake.chrome.runtime.getURL(path),
     getBook: books.getBook,
+    listBooks: books.listBooks,
     removeBook: books.removeBook,
     trackBook: books.trackBook,
     updateCustomTitle: books.updateCustomTitle,
