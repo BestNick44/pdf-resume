@@ -52,6 +52,19 @@ button {
   cursor: pointer;
 }
 
+#fileAccessInstructions {
+  margin-top: 1rem;
+}
+
+#fileAccessInstructions ol {
+  margin-bottom: 0;
+  padding-left: 1.5rem;
+}
+
+#fileAccessInstructions li + li {
+  margin-top: 0.5rem;
+}
+
 #trackedDashboard {
   margin-top: 0.75rem;
 }

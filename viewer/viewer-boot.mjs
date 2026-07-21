@@ -5,7 +5,7 @@ import {
 } from "./viewer-url.mjs";
 
 const READ_ERROR =
-  "The local PDF could not be read. Enable “Allow access to file URLs” for pdf-resume and verify that the file still exists.";
+  "The local PDF could not be read. Verify that the file still exists and can be opened.";
 
 export async function bootViewer({
   search,

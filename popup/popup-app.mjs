@@ -101,6 +101,7 @@ export function createPopupApp({
   getTab,
   updateTab,
   getRuntimeUrl,
+  isFileSchemeAccessAllowed,
   getBook,
   listBooks,
   removeBook,
@@ -113,6 +114,7 @@ export function createPopupApp({
     typeof getTab !== "function" ||
     typeof updateTab !== "function" ||
     typeof getRuntimeUrl !== "function" ||
+    typeof isFileSchemeAccessAllowed !== "function" ||
     typeof getBook !== "function" ||
     typeof listBooks !== "function" ||
     typeof removeBook !== "function" ||
@@ -342,6 +344,10 @@ export function createPopupApp({
       }
 
       candidate.persisted = false;
+      if (!(await isFileSchemeAccessAllowed())) {
+        render("showFileAccessInstructions", { filename: candidate.filename });
+        return;
+      }
       showReadyCandidate();
     } catch {
       candidate = undefined;

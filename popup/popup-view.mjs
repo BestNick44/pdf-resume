@@ -13,6 +13,7 @@ function remainingLabel(pagesRemaining) {
 export function createPopupView({ hostDocument = globalThis.document } = {}) {
   const main = requireElement(hostDocument, "#popupMain");
   const status = requireElement(hostDocument, "#popupStatus");
+  const fileAccessInstructions = requireElement(hostDocument, "#fileAccessInstructions");
   const book = requireElement(hostDocument, "#popupBook");
   const filename = requireElement(hostDocument, "#bookFilename");
   const message = requireElement(hostDocument, "#popupMessage");
@@ -49,6 +50,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
 
   function reset({ busy = false } = {}) {
     main.setAttribute("aria-busy", String(busy));
+    fileAccessInstructions.hidden = true;
     book.hidden = true;
     filename.textContent = "";
     dashboard.hidden = true;
@@ -165,6 +167,13 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       error.textContent = details.message ?? "The popup encountered an error.";
       error.hidden = false;
       showAction(details.actionLabel);
+    },
+
+    showFileAccessInstructions(details = {}) {
+      reset();
+      status.textContent = "File access required";
+      showBook(details);
+      fileAccessInstructions.hidden = false;
     },
 
     showIneligible() {
