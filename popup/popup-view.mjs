@@ -95,19 +95,20 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     const progressRow = hostDocument.createElement("span");
     const progress = hostDocument.createElement("progress");
     const progressLabel = hostDocument.createElement("span");
+    const summaryText = `Page ${details.currentPage} of ${
+      details.totalPages > 0 ? details.totalPages : "—"
+    }`;
 
     item.className = "library-book";
     button.className = "library-book-button";
     button.type = "button";
     button.disabled = busy;
-    button.setAttribute("aria-label", `Open ${details.title}`);
+    button.setAttribute("aria-label", `Open ${details.title}, ${summaryText}`);
     button.addEventListener("click", () => openBookHandler?.(details.fileUrl));
     title.className = "library-book-title";
     title.textContent = details.title;
     summary.className = "library-book-summary";
-    summary.textContent = `Page ${details.currentPage} of ${
-      details.totalPages > 0 ? details.totalPages : "—"
-    }`;
+    summary.textContent = summaryText;
     progressRow.className = "progress-row";
     progress.max = 100;
     progress.setAttribute("aria-label", `Reading progress for ${details.title}`);

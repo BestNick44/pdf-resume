@@ -144,6 +144,21 @@ test("clicking a library book opens it in the viewer on the captured active tab"
       },
     ],
   );
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "library",
+    {
+      books: [
+        {
+          fileUrl: BOOK_A_URL,
+          title: "Metadata A",
+          currentPage: 25,
+          totalPages: 100,
+          progressPercent: 25,
+        },
+      ],
+      status: "Opening Metadata A in the viewer…",
+    },
+  ]);
 });
 
 test("failed library navigation keeps the library visible and retryable", async () => {
@@ -212,6 +227,10 @@ test("library view renders accessible book buttons and a progress bar for every 
   assert.equal(firstButton.type, "button");
   assert.equal(firstTitle.textContent, '<img src=x onerror="alert(1)">');
   assert.equal(firstSummary.textContent, "Page 25 of 100");
+  assert.equal(
+    firstButton.attributes["aria-label"],
+    'Open <img src=x onerror="alert(1)">, Page 25 of 100',
+  );
   assert.equal(firstProgress.tagName, "PROGRESS");
   assert.equal(firstProgress.max, 100);
   assert.equal(firstProgress.value, 25);
@@ -223,6 +242,7 @@ test("library view renders accessible book buttons and a progress bar for every 
   const [, secondSummary] = secondButton.children;
   const [secondProgress, secondProgressLabel] = secondProgressRow.children;
   assert.equal(secondSummary.textContent, "Page 8 of —");
+  assert.equal(secondButton.attributes["aria-label"], "Open Reader B, Page 8 of —");
   assert.equal(secondProgress.tagName, "PROGRESS");
   assert.equal(secondProgressLabel.textContent, "Progress unavailable");
 

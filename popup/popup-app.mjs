@@ -286,6 +286,10 @@ export function createPopupApp({
       if (openedTab === undefined) {
         throw new Error("the tracked book could not be opened in the viewer");
       }
+      render("showLibrary", {
+        books: libraryBooks,
+        status: `Opening ${book.title} in the viewer…`,
+      });
     } catch {
       render("showLibrary", {
         books: libraryBooks,
