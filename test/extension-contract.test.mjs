@@ -364,6 +364,7 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
       objectUrlBlobs.push(blob);
       return objectUrl;
     },
+    isFileSchemeAccessAllowed: async () => true,
     pdfJsViewerUrl: new URL(
       "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
     ),
@@ -429,6 +430,7 @@ test("viewer boot presents local input errors without creating or showing a view
         createObjectUrl() {
           objectUrlCalls += 1;
         },
+        isFileSchemeAccessAllowed: async () => true,
         pdfJsViewerUrl: new URL(
           "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
         ),
@@ -494,6 +496,7 @@ test("viewer boot rejects bad signatures and presents local read failures", asyn
         createObjectUrl() {
           objectUrlCalls += 1;
         },
+        isFileSchemeAccessAllowed: async () => true,
         pdfJsViewerUrl: new URL(
           "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
         ),

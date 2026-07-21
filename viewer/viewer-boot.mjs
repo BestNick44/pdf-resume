@@ -11,11 +11,17 @@ export async function bootViewer({
   search,
   fetchPdf,
   createObjectUrl,
+  isFileSchemeAccessAllowed,
   pdfJsViewerUrl,
   view,
 }) {
   try {
     const fileUrl = parseViewerFileQuery(search);
+    if (!(await isFileSchemeAccessAllowed())) {
+      view.showFileAccessInstructions();
+      return undefined;
+    }
+
     const response = await fetchPdf(fileUrl.href, {
       cache: "no-store",
       credentials: "omit",

@@ -263,7 +263,7 @@ test("canonical encoded filenames use the shared cleaner and hostile text stays 
   assert.doesNotMatch(harness.view.calls.at(-1)[1].filename, /[\p{Cc}\p{Cf}]/u);
 });
 
-test("already tracked PDFs show a bounded truthful state without writing or navigating", async () => {
+test("already tracked PDFs request file access without writing or navigating", async () => {
   const existing = canonicalRecord({ title: "Hydrated title", totalPages: 30 });
   const harness = createHarness({
     fileSchemeAccessAllowed: false,
@@ -284,10 +284,11 @@ test("already tracked PDFs show a bounded truthful state without writing or navi
         totalPages: 30,
         pagesRemaining: 29,
         progressPercent: 3,
+        fileAccessRequired: true,
       },
     ],
   ]);
-  assert.equal(harness.fileSchemeAccessChecks, 0);
+  assert.equal(harness.fileSchemeAccessChecks, 1);
   assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
   assert.equal(startedTabOperations(harness.fake, "update").length, 0);
   assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], existing);

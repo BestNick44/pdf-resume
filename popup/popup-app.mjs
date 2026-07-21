@@ -130,6 +130,7 @@ export function createPopupApp({
   let destroyed = false;
   let libraryBooks;
   let libraryTabId;
+  let needsFileAccessInstructions = false;
   let pending;
   let started = false;
   let trackedBook;
@@ -138,6 +139,13 @@ export function createPopupApp({
     if (!destroyed) {
       view[method](details);
     }
+  }
+
+  function currentTrackedBookDetails(status = {}) {
+    return trackedBookDetails(trackedBook, {
+      ...status,
+      ...(needsFileAccessInstructions ? { fileAccessRequired: true } : {}),
+    });
   }
 
   function showReadyCandidate() {
@@ -211,7 +219,10 @@ export function createPopupApp({
   }
 
   async function runRename(customTitle) {
-    render("showTracked", trackedBookDetails(trackedBook, { busy: true, status: "Saving title…" }));
+    render(
+      "showTracked",
+      currentTrackedBookDetails({ busy: true, status: "Saving title…" }),
+    );
     try {
       const updated = await updateCustomTitle(candidate.fileUrl, customTitle);
       if (!updated) {
@@ -222,11 +233,14 @@ export function createPopupApp({
         return;
       }
       trackedBook = updated;
-      render("showTracked", trackedBookDetails(trackedBook, { status: "Title saved." }));
+      render(
+        "showTracked",
+        currentTrackedBookDetails({ status: "Title saved." }),
+      );
     } catch {
       render(
         "showTracked",
-        trackedBookDetails(trackedBook, {
+        currentTrackedBookDetails({
           error: "The title could not be saved. Try again.",
           status: "Unable to save title",
         }),
@@ -250,7 +264,10 @@ export function createPopupApp({
 
   async function runUntrack() {
     const title = trackedBook.customTitle ?? trackedBook.title;
-    render("showTracked", trackedBookDetails(trackedBook, { busy: true, status: "Untracking…" }));
+    render(
+      "showTracked",
+      currentTrackedBookDetails({ busy: true, status: "Untracking…" }),
+    );
     try {
       await removeBook(candidate.fileUrl);
       trackedBook = undefined;
@@ -258,7 +275,7 @@ export function createPopupApp({
     } catch {
       render(
         "showTracked",
-        trackedBookDetails(trackedBook, {
+        currentTrackedBookDetails({
           error: "This book could not be untracked. Try again.",
           status: "Unable to untrack",
         }),
@@ -339,7 +356,8 @@ export function createPopupApp({
         candidate.persisted = true;
         canActivate = false;
         trackedBook = existing;
-        render("showTracked", trackedBookDetails(trackedBook));
+        needsFileAccessInstructions = !(await isFileSchemeAccessAllowed());
+        render("showTracked", currentTrackedBookDetails());
         return;
       }
 

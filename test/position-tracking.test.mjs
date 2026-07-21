@@ -1531,15 +1531,82 @@ test("worker messaging validates private canonical updates and never creates an 
   await drainMicrotasks();
 });
 
-test("viewer explains how to enable local file access before booting the PDF", async () => {
+test("viewer rejects invalid input before checking local file access", async (t) => {
+  const invalidInputs = [
+    ["missing", ""],
+    ["malformed", "?file=file:///tmp/book.pdf"],
+    [
+      "extra",
+      `?file=${encodeURIComponent("file:///tmp/book.pdf")}&extra=1`,
+    ],
+    ["remote", `?file=${encodeURIComponent("https://example.test/book.pdf")}`],
+    ["non-PDF", `?file=${encodeURIComponent("file:///tmp/book.txt")}`],
+  ];
+
+  for (const [name, search] of invalidInputs) {
+    await t.test(name, async () => {
+      const hostWindow = new FakeEventTarget();
+      hostWindow.location = { search };
+      const frame = new FakeEventTarget();
+      frame.hidden = true;
+      frame.src = "";
+      const errorPanel = { hidden: true };
+      const errorMessage = { textContent: "" };
+      const fileAccessInstructions = { hidden: true };
+      const warningPanel = { hidden: true };
+      const warningMessage = { textContent: "" };
+      const elements = new Map([
+        ["#pdfViewer", frame],
+        ["#viewerError", errorPanel],
+        ["#viewerErrorMessage", errorMessage],
+        ["#viewerFileAccessInstructions", fileAccessInstructions],
+        ["#viewerWarning", warningPanel],
+        ["#viewerWarningMessage", warningMessage],
+      ]);
+      const hostDocument = {
+        querySelector: (selector) => elements.get(selector),
+      };
+      let fileSchemeAccessChecks = 0;
+
+      const app = await startViewerApp({
+        hostDocument,
+        hostWindow,
+        async isFileSchemeAccessAllowed() {
+          fileSchemeAccessChecks += 1;
+          return false;
+        },
+        fetchPdf: async () => assert.fail("invalid input must not be fetched"),
+        createObjectUrl: () => assert.fail("invalid input must not create an object URL"),
+        pdfJsViewerUrl: new URL(
+          "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+        ),
+      });
+
+      assert.equal(app, undefined);
+      assert.equal(fileSchemeAccessChecks, 0);
+      assert.equal(errorPanel.hidden, false);
+      assert.equal(
+        errorMessage.textContent,
+        "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.",
+      );
+      assert.equal(fileAccessInstructions.hidden, true);
+      assert.equal(frame.hidden, true);
+      assert.equal(frame.src, "");
+    });
+  }
+});
+
+test("viewer explains how to enable local file access without starting the PDF", async () => {
   const hostWindow = new FakeEventTarget();
   hostWindow.location = { search: `?file=${encodeURIComponent(BOOK_URL)}` };
   const frame = new FakeEventTarget();
-  const errorPanel = {};
-  const errorMessage = {};
-  const fileAccessInstructions = {};
-  const warningPanel = {};
-  const warningMessage = {};
+  frame.hidden = true;
+  frame.src = "";
+  const errorPanel = { hidden: true };
+  const errorMessage = { textContent: "" };
+  const fileAccessInstructions = { hidden: true };
+  const warningPanel = { hidden: true };
+  const warningMessage = { textContent: "" };
   const elements = new Map([
     ["#pdfViewer", frame],
     ["#viewerError", errorPanel],
@@ -1551,7 +1618,6 @@ test("viewer explains how to enable local file access before booting the PDF", a
   const hostDocument = {
     querySelector: (selector) => elements.get(selector),
   };
-  const viewCalls = [];
   let fileSchemeAccessChecks = 0;
 
   const app = await startViewerApp({
@@ -1561,27 +1627,22 @@ test("viewer explains how to enable local file access before booting the PDF", a
       fileSchemeAccessChecks += 1;
       return false;
     },
-    bootViewerOperation: async () => assert.fail("a denied local PDF must not be booted"),
-    createView(viewElements) {
-      assert.deepEqual(viewElements, {
-        errorPanel,
-        errorMessage,
-        fileAccessInstructions,
-        frame,
-        warningPanel,
-        warningMessage,
-      });
-      return {
-        showFileAccessInstructions() {
-          viewCalls.push("file-access-instructions");
-        },
-      };
-    },
+    fetchPdf: async () => assert.fail("a denied local PDF must not be fetched"),
+    createObjectUrl: () =>
+      assert.fail("a denied local PDF must not create an object URL"),
+    pdfJsViewerUrl: new URL(
+      "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+    ),
   });
 
   assert.equal(app, undefined);
   assert.equal(fileSchemeAccessChecks, 1);
-  assert.deepEqual(viewCalls, ["file-access-instructions"]);
+  assert.equal(fileAccessInstructions.hidden, false);
+  assert.equal(errorPanel.hidden, true);
+  assert.equal(errorMessage.textContent, "");
+  assert.equal(frame.hidden, true);
+  assert.equal(frame.src, "");
+  assert.equal(frame.listenerCount("load"), 0);
 });
 
 test("production composition wires canonical boot, actual tracking, worker handoff, and teardown", async () => {

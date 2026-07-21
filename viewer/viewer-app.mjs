@@ -39,15 +39,11 @@ export async function startViewerApp({
     warningPanel: hostDocument.querySelector("#viewerWarning"),
     warningMessage: hostDocument.querySelector("#viewerWarningMessage"),
   });
-  if (!(await isFileSchemeAccessAllowed())) {
-    view.showFileAccessInstructions();
-    return undefined;
-  }
-
   const viewer = await bootViewerOperation({
     search: hostWindow.location.search,
     fetchPdf,
     createObjectUrl,
+    isFileSchemeAccessAllowed,
     pdfJsViewerUrl,
     view,
   });

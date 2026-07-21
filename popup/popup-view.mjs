@@ -228,9 +228,11 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
 
     showTracked(details = {}) {
       reset({ busy: details.busy });
-      status.textContent = details.status ?? "Reading progress";
+      status.textContent =
+        details.status ?? (details.fileAccessRequired ? "File access required" : "Reading progress");
       showBook(details);
       dashboard.hidden = false;
+      fileAccessInstructions.hidden = !details.fileAccessRequired;
       pageSummary.textContent = `Page ${details.currentPage} of ${
         details.totalPages > 0 ? details.totalPages : "—"
       }`;

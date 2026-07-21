@@ -64,7 +64,12 @@ function createViewSpy() {
   };
 }
 
-function createHarness({ book = canonicalRecord(), tabUrl = VIEWER_URL } = {}) {
+function createHarness({
+  book = canonicalRecord(),
+  fileSchemeAccessAllowed = true,
+  tabUrl = VIEWER_URL,
+  view = createViewSpy(),
+} = {}) {
   const fake = createChromeExtensionFake({
     activeTabId: TAB_ID,
     storage: { books: { [BOOK_URL]: book } },
@@ -75,10 +80,13 @@ function createHarness({ book = canonicalRecord(), tabUrl = VIEWER_URL } = {}) {
     lockManager: fake.locks,
     now: () => 1_800_000_200,
   });
-  const view = createViewSpy();
+  let fileSchemeAccessChecks = 0;
   const app = createPopupApp({
     view,
-    isFileSchemeAccessAllowed: async () => true,
+    async isFileSchemeAccessAllowed() {
+      fileSchemeAccessChecks += 1;
+      return fileSchemeAccessAllowed;
+    },
     queryActiveTab: (query) => fake.chrome.tabs.query(query),
     getTab: (tabId) => fake.chrome.tabs.get(tabId),
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
@@ -89,8 +97,47 @@ function createHarness({ book = canonicalRecord(), tabUrl = VIEWER_URL } = {}) {
     trackBook: books.trackBook,
     updateCustomTitle: books.updateCustomTitle,
   });
-  return { app, books, fake, view };
+  return {
+    app,
+    books,
+    fake,
+    get fileSchemeAccessChecks() {
+      return fileSchemeAccessChecks;
+    },
+    view,
+  };
 }
+
+test("tracked local PDF and viewer popups preserve the dashboard while requesting file access", async (t) => {
+  for (const [name, tabUrl] of [
+    ["local PDF", BOOK_URL],
+    ["extension viewer", VIEWER_URL],
+  ]) {
+    await t.test(name, async () => {
+      const { elements, hostDocument } = createPopupDocumentFake();
+      const harness = createHarness({
+        book: canonicalRecord({ customTitle: "Reader name" }),
+        fileSchemeAccessAllowed: false,
+        tabUrl,
+        view: createPopupView({ hostDocument }),
+      });
+
+      await harness.app.start();
+
+      assert.equal(harness.fileSchemeAccessChecks, 1);
+      assert.equal(elements["#popupStatus"].textContent, "File access required");
+      assert.equal(elements["#bookFilename"].textContent, "Reader name");
+      assert.equal(elements["#trackedDashboard"].hidden, false);
+      assert.equal(elements["#pageSummary"].textContent, "Page 45 of 123");
+      assert.equal(elements["#pagesRemaining"].textContent, "78 pages remaining");
+      assert.equal(elements["#progressPercent"].textContent, "37%");
+      assert.equal(elements["#customTitle"].value, "Reader name");
+      assert.equal(elements["#untrackButton"].disabled, false);
+      assert.equal(elements["#fileAccessInstructions"].hidden, false);
+      assert.equal(elements["#trackButton"].hidden, true);
+    });
+  }
+});
 
 test("tracked viewer tab shows its title and reading progress", async () => {
   const harness = createHarness({ book: canonicalRecord({ customTitle: "Reader name" }) });
