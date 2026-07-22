@@ -8,9 +8,15 @@
     "format:check": "node scripts/check-format.mjs",
     "lint": "node scripts/check-syntax.mjs",
     "test": "node scripts/run-tests.mjs",
-    "check": "npm run format:check && npm run lint && npm test"
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
+    "typecheck": "node scripts/check-types.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.2.2",
+    "@types/node": "26.1.1",
+    "typescript": "7.0.2"
   }
 }

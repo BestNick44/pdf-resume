@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import {
   assertRegularFile,
   discoverAppHtmlFiles,
+  discoverAppJavaScriptFiles,
   discoverHtmlResourceReferences,
   validateStaticResourceGraph,
 } from "../scripts/project-discovery.mjs";
@@ -113,6 +115,77 @@ test("package configuration treats JavaScript extension entries as ESM", async (
   );
 
   assert.equal(packageJson.type, "module");
+});
+
+test("type checking is strict, dev-only, and never emits runtime files", async () => {
+  const packageJson = JSON.parse(
+    await readFile(path.join(projectRoot, "package.json"), "utf8"),
+  );
+  const tsconfig = JSON.parse(
+    await readFile(path.join(projectRoot, "tsconfig.json"), "utf8"),
+  );
+  const gitignore = await readFile(path.join(projectRoot, ".gitignore"), "utf8");
+
+  assert.equal(packageJson.dependencies, undefined);
+  assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), [
+    "@types/chrome",
+    "@types/node",
+    "typescript",
+  ]);
+  for (const version of Object.values(packageJson.devDependencies)) {
+    assert.doesNotMatch(version, /^[~^]/u);
+  }
+  assert.equal(packageJson.scripts.typecheck, "node scripts/check-types.mjs");
+  assert.equal(
+    packageJson.scripts.check,
+    "npm run format:check && npm run lint && npm run typecheck && npm test",
+  );
+  assert.deepEqual(tsconfig, {
+    compilerOptions: {
+      strict: true,
+      noEmit: true,
+      allowJs: true,
+      checkJs: false,
+      module: "nodenext",
+      moduleResolution: "nodenext",
+      target: "es2022",
+      lib: ["es2022", "dom"],
+      types: ["chrome", "node"],
+    },
+    exclude: ["viewer/pdfjs/**", "node_modules"],
+  });
+  assert.equal(gitignore, "node_modules/\n");
+});
+
+test("type checking explains how to install a missing local compiler", async (t) => {
+  const temporaryProject = await mkdtemp(path.join(tmpdir(), "pdf-resume-typecheck-"));
+  t.after(() => rm(temporaryProject, { recursive: true, force: true }));
+  const checkerPath = path.join(temporaryProject, "check-types.mjs");
+  await copyFile(resolveExtensionPath("scripts/check-types.mjs"), checkerPath);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [checkerPath], { cwd: temporaryProject }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.equal(
+        error.stderr,
+        'Type checking requires dev dependencies: run "npm install"\n',
+      );
+      return true;
+    },
+  );
+});
+
+test("project discovery is the only JavaScript file opted into type checking", async () => {
+  const checkedFiles = [];
+
+  for (const filePath of await discoverAppJavaScriptFiles(projectRoot)) {
+    if ((await readFile(filePath, "utf8")).startsWith("// @ts-check\n")) {
+      checkedFiles.push(path.relative(projectRoot, filePath));
+    }
+  }
+
+  assert.deepEqual(checkedFiles, [path.join("scripts", "project-discovery.mjs")]);
 });
 
 test("every manifest entry point is a packaged regular file", async () => {
