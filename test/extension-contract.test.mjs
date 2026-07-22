@@ -384,12 +384,12 @@ test("shared storage module exposes its API without resolving extension globals 
       "updateCustomTitle",
       "removeBook",
       "listBooks",
-      "updatePosition",
       "updatePendingPositionObservation",
       "updatePositionObservation",
     ].filter((operation) => typeof storageModule[operation] !== "function"),
     [],
   );
+  assert.equal(Object.hasOwn(storageModule, "updatePosition"), false);
 });
 
 test("viewer accepts canonically encoded local PDF URLs", async () => {

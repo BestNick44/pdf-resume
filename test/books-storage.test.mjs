@@ -5,11 +5,12 @@ import {
   BooksStorageDataError,
   createBooksStorage,
   getBook,
+  getPositionTrackingState,
   listBooks,
   removeBook,
   trackBook,
   updateCustomTitle,
-  updatePosition,
+  updatePositionObservation,
   upsertBook,
 } from "../storage/books.mjs";
 import { createChromeStorageFake } from "./support/chrome-storage-fake.mjs";
@@ -231,16 +232,25 @@ test("upsert rejects an explicit total that is below the preserved current page"
   assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
 });
 
-test("position updates preserve metadata and only advance position and last-read fields", async () => {
+test("position observations preserve metadata and only advance position and last-read fields", async () => {
   const existing = canonicalRecord({ customTitle: "Keep this title" });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
   const books = createTestBooksStorage(fake);
 
-  const updated = await books.updatePosition(BOOK_A, {
-    currentPage: 13,
-    scrollTop: 999.25,
-  });
+  assert.equal(
+    await books.updatePositionObservation(
+      BOOK_A,
+      { currentPage: 13, scrollTop: 999.25 },
+      {
+        viewerId: "1".repeat(32),
+        sequence: 1,
+        observedAt: 1_800_000_000_000,
+      },
+    ),
+    "updated",
+  );
 
+  const updated = fake.snapshot().books[BOOK_A];
   assert.deepEqual(updated, {
     ...existing,
     currentPage: 13,
@@ -253,7 +263,7 @@ test("position updates preserve metadata and only advance position and last-read
   assert.equal(updated.addedAt, existing.addedAt);
 });
 
-test("position updates can advance beyond a stale known total without changing metadata", async () => {
+test("position observations can advance beyond a stale known total without changing metadata", async () => {
   const existing = canonicalRecord({
     customTitle: "Reader override",
     currentPage: 7,
@@ -262,61 +272,45 @@ test("position updates can advance beyond a stale known total without changing m
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
   const books = createTestBooksStorage(fake);
 
-  const updated = await books.updatePosition(BOOK_A, {
-    currentPage: 8,
-    scrollTop: 800,
-  });
+  assert.equal(
+    await books.updatePositionObservation(
+      BOOK_A,
+      { currentPage: 8, scrollTop: 800 },
+      {
+        viewerId: "2".repeat(32),
+        sequence: 1,
+        observedAt: 1_800_000_000_000,
+      },
+    ),
+    "updated",
+  );
 
-  assert.deepEqual(updated, {
+  assert.deepEqual(fake.snapshot().books[BOOK_A], {
     ...existing,
     currentPage: 8,
     scrollTop: 800,
     lastReadAt: 1_800_000_000,
   });
-  assert.deepEqual(fake.snapshot().books[BOOK_A], updated);
 });
 
-test("position updates can patch one position field and keep timestamps monotonic", async () => {
+test("position observations can patch one position field and keep timestamps monotonic", async () => {
   const existing = canonicalRecord({ lastReadAt: 1_900_000_000 });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
   const books = createTestBooksStorage(fake, 1_800_000_000);
+  const viewerId = "3".repeat(32);
+  const state = await books.getPositionTrackingState(BOOK_A, viewerId);
 
-  const updated = await books.updatePosition(BOOK_A, { scrollTop: 0 });
-
-  assert.deepEqual(updated, { ...existing, scrollTop: 0 });
-});
-
-test("observed position order rejects stale delivery and permits later backward navigation", async () => {
-  const existing = canonicalRecord({
-    currentPage: 20,
-    lastReadAt: 1_750_000_002,
-    scrollTop: 2_000,
-  });
-  const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
-  const books = createTestBooksStorage(fake, 1_800_000_000);
-
-  assert.deepEqual(
-    await books.updatePosition(
+  assert.equal(
+    await books.updatePositionObservation(
       BOOK_A,
-      { currentPage: 2, scrollTop: 200 },
-      { observedAt: 1_750_000_001_999 },
+      { scrollTop: 0 },
+      { viewerId, sequence: 1, observedAt: 1_800_000_000_000 },
+      state.trackingGeneration,
     ),
-    existing,
+    "updated",
   );
-  assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
 
-  const updated = await books.updatePosition(
-    BOOK_A,
-    { currentPage: 3, scrollTop: 300 },
-    { observedAt: 1_750_000_003_100 },
-  );
-  assert.deepEqual(updated, {
-    ...existing,
-    currentPage: 3,
-    scrollTop: 300,
-    lastReadAt: 1_750_000_003,
-  });
-  assert.deepEqual(fake.snapshot().books[BOOK_A], updated);
+  assert.deepEqual(fake.snapshot().books[BOOK_A], { ...existing, scrollTop: 0 });
 });
 
 test("observed position updates durably reject older same-second delivery", async () => {
@@ -496,46 +490,6 @@ test("untracked updates install no order and remove plus retrack resets prior or
       retrackedState.trackingGeneration,
     ),
   });
-});
-
-test("legacy position writes preserve known stale-viewer rejection state", async () => {
-  const existing = canonicalRecord({
-    addedAt: 1_000,
-    currentPage: 1,
-    lastReadAt: 1_000,
-    scrollTop: 100,
-  });
-  const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
-  const books = createTestBooksStorage(fake, 2_000);
-  const viewerId = "4".repeat(32);
-
-  assert.equal(
-    await books.updatePositionObservation(
-      BOOK_A,
-      { currentPage: 2, scrollTop: 200 },
-      { viewerId, sequence: 2, observedAt: 1_002_900 },
-    ),
-    "updated",
-  );
-  assert.equal(
-    (
-      await books.updatePosition(
-        BOOK_A,
-        { currentPage: 9, scrollTop: 900 },
-        { observedAt: 1_002_950 },
-      )
-    ).currentPage,
-    9,
-  );
-  assert.equal(
-    await books.updatePositionObservation(
-      BOOK_A,
-      { currentPage: 1, scrollTop: 100 },
-      { viewerId, sequence: 1, observedAt: 1_002_100 },
-    ),
-    "stale",
-  );
-  assert.equal(fake.snapshot().books[BOOK_A].currentPage, 9);
 });
 
 test("an observation captured before remove and same-second retrack cannot mutate the new lifetime", async () => {
@@ -1013,40 +967,6 @@ test("v2 winner validation rejects every nonmaximum winner before mutation", asy
   }
 });
 
-test("position observation options reject malformed or future order before storage access", async () => {
-  const invalidOptions = [
-    null,
-    {},
-    { observedAt: -1 },
-    { observedAt: 1.5 },
-    { observedAt: Number.MAX_SAFE_INTEGER + 1 },
-    { observedAt: 1_750_000_000_000, extra: true },
-    { unexpected: 1_750_000_000_000 },
-    { observedAt: 1_800_000_001_000 },
-  ];
-
-  for (const options of invalidOptions) {
-    const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
-    await assert.rejects(() =>
-      createTestBooksStorage(fake, 1_800_000_000).updatePosition(
-        BOOK_A,
-        { currentPage: 2 },
-        options,
-      ),
-    );
-    assert.deepEqual(fake.operations, []);
-  }
-});
-
-test("position update for an untracked book is a no-op", async () => {
-  const fake = createChromeStorageFake({ books: { [BOOK_B]: canonicalRecord() } });
-  const books = createTestBooksStorage(fake);
-
-  assert.equal(await books.updatePosition(BOOK_A, { currentPage: 2 }), undefined);
-  assert.deepEqual(fake.snapshot(), { books: { [BOOK_B]: canonicalRecord() } });
-  assert.equal(fake.operations.filter(({ method }) => method === "set").length, 0);
-});
-
 test("a stale current page above a known total remains readable without state churn", async () => {
   const existing = canonicalRecord({ currentPage: 12, totalPages: 7 });
   const fake = createChromeStorageFake({ books: { [BOOK_A]: existing } });
@@ -1206,7 +1126,17 @@ test("position patches reject invalid shapes before storage access", async () =>
 
   for (const patch of invalidPatches) {
     const fake = createChromeStorageFake();
-    await assert.rejects(() => createTestBooksStorage(fake).updatePosition(BOOK_A, patch));
+    await assert.rejects(() =>
+      createTestBooksStorage(fake).updatePositionObservation(
+        BOOK_A,
+        patch,
+        {
+          viewerId: "9".repeat(32),
+          sequence: 1,
+          observedAt: 1_800_000_000_000,
+        },
+      ),
+    );
     assert.deepEqual(fake.operations, []);
   }
 });
@@ -1315,7 +1245,15 @@ test("cross-context lock preserves simultaneous updates to distinct books", asyn
   const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldRead = fake.holdNext("get", { after: true });
 
-  const viewerWrite = viewerStore.updatePosition(BOOK_A, { currentPage: 20 });
+  const viewerWrite = viewerStore.updatePositionObservation(
+    BOOK_A,
+    { currentPage: 20 },
+    {
+      viewerId: "a".repeat(32),
+      sequence: 1,
+      observedAt: 1_800_000_001_000,
+    },
+  );
   await heldRead.started;
   const popupWrite = popupStore.upsertBook(BOOK_B, { title: "B" });
   for (let index = 0; index < 5; index += 1) {
@@ -1339,10 +1277,15 @@ test("custom title updates preserve all latest fields under the cross-context lo
   const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldWrite = fake.holdNext("set");
 
-  const positionWrite = viewerStore.updatePosition(BOOK_A, {
-    currentPage: 20,
-    scrollTop: 900,
-  });
+  const positionWrite = viewerStore.updatePositionObservation(
+    BOOK_A,
+    { currentPage: 20, scrollTop: 900 },
+    {
+      viewerId: "b".repeat(32),
+      sequence: 1,
+      observedAt: 1_800_000_001_000,
+    },
+  );
   await heldWrite.started;
   const renameWrite = popupStore.updateCustomTitle(BOOK_A, "Renamed");
   heldWrite.release();
@@ -1408,7 +1351,15 @@ test("cross-context lock preserves simultaneous partial updates to the same book
   const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldWrite = fake.holdNext("set");
 
-  const viewerWrite = viewerStore.updatePosition(BOOK_A, { currentPage: 20 });
+  const viewerWrite = viewerStore.updatePositionObservation(
+    BOOK_A,
+    { currentPage: 20 },
+    {
+      viewerId: "c".repeat(32),
+      sequence: 1,
+      observedAt: 1_800_000_001_000,
+    },
+  );
   await heldWrite.started;
   const popupWrite = popupStore.upsertBook(BOOK_A, { customTitle: "Renamed" });
   heldWrite.release();
@@ -1425,7 +1376,15 @@ test("cross-context lock preserves simultaneous partial updates to the same book
 test("unavailable locks reject on the bounded deadline without touching storage", async () => {
   const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
   const heldRead = fake.holdNext("get", { after: true });
-  const holderWrite = createTestBooksStorage(fake).updatePosition(BOOK_A, { currentPage: 20 });
+  const holderWrite = createTestBooksStorage(fake).updatePositionObservation(
+    BOOK_A,
+    { currentPage: 20 },
+    {
+      viewerId: "d".repeat(32),
+      sequence: 1,
+      observedAt: 1_800_000_000_000,
+    },
+  );
   await heldRead.started;
 
   const timeout = new AbortController();
@@ -1477,10 +1436,26 @@ test("top-level API resolves Chrome dependencies lazily in extension contexts", 
     const renamed = await updateCustomTitle(BOOK_A, "Reader name");
     assert.deepEqual(renamed, { ...updated, customTitle: "Reader name" });
     assert.deepEqual(await listBooks(), [{ fileUrl: BOOK_A, book: renamed }]);
-    assert.deepEqual(
-      await updatePosition(BOOK_A, { currentPage: 2, scrollTop: 10 }),
-      { ...renamed, currentPage: 2, scrollTop: 10 },
+    const viewerId = "e".repeat(32);
+    const state = await getPositionTrackingState(BOOK_A, viewerId);
+    assert.equal(
+      await updatePositionObservation(
+        BOOK_A,
+        { currentPage: 2, scrollTop: 10 },
+        {
+          viewerId,
+          sequence: 1,
+          observedAt: renamed.lastReadAt * 1_000,
+        },
+        state.trackingGeneration,
+      ),
+      "updated",
     );
+    assert.deepEqual(await getBook(BOOK_A), {
+      ...renamed,
+      currentPage: 2,
+      scrollTop: 10,
+    });
     assert.equal(await removeBook(BOOK_A), true);
   } finally {
     restore();
