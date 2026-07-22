@@ -1,13 +1,6 @@
 // @ts-check
 
 /**
- * @typedef {{
- *   initializedPromise: PromiseLike<unknown>,
- *   open: (options: { url: string, originalUrl: string }) => PromiseLike<unknown>,
- * }} OpenablePdfJsApplication
- */
-
-/**
  * @param {{
  *   frame: HTMLIFrameElement,
  *   errorPanel: HTMLElement,
@@ -87,9 +80,7 @@ export function createViewerView({
       const frameWindow = /** @type {import("../types/pdfjs.d.ts").PdfJsWindow | null} */ (
         frame.contentWindow
       );
-      const application = /** @type {OpenablePdfJsApplication | undefined} */ (
-        /** @type {unknown} */ (frameWindow?.PDFViewerApplication)
-      );
+      const application = frameWindow?.PDFViewerApplication;
       if (!application?.initializedPromise || typeof application.open !== "function") {
         throw new Error("PDF.js application is unavailable.");
       }
