@@ -1,3 +1,5 @@
+// @ts-check
+
 const UNSAFE_TITLE_CHARACTERS =
   /[\p{Cc}\u00AD\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/u;
 const URL_LIKE_TITLE = /^(?:blob|data|file|https?|javascript):/iu;
@@ -6,16 +8,28 @@ const PDF_PATH_TITLE = /[\\/][^\\/]*\.pdf$/iu;
 const TITLE_SEPARATOR_NOISE = /[\s._–—-]/gu;
 const INVISIBLE_OR_CONTROL_FORMATTING = /[\p{Cc}\p{Cf}]/gu;
 
+/**
+ * @param {string} value
+ * @returns {string}
+ */
 function normalizeWhitespace(value) {
   return value.replace(/\s+/gu, " ").trim();
 }
 
+/**
+ * @param {string} value
+ * @returns {string}
+ */
 function removeUnsafeFilenameFormatting(value) {
   return value.replace(INVISIBLE_OR_CONTROL_FORMATTING, (character) =>
     character === "\u200C" || character === "\u200D" ? character : "",
   );
 }
 
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
 function hasMeaningfulTitleContent(value) {
   return (
     value
@@ -24,6 +38,10 @@ function hasMeaningfulTitleContent(value) {
   );
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
 export function normalizePdfMetadataTitle(value) {
   if (typeof value !== "string" || UNSAFE_TITLE_CHARACTERS.test(value)) {
     return undefined;
@@ -41,6 +59,10 @@ export function normalizePdfMetadataTitle(value) {
   return title;
 }
 
+/**
+ * @param {unknown} metadataResult
+ * @returns {string | undefined}
+ */
 export function titleFromPdfMetadata(metadataResult) {
   if (
     metadataResult === null ||
@@ -63,9 +85,13 @@ export function titleFromPdfMetadata(metadataResult) {
     : undefined;
 }
 
+/**
+ * @param {string} fileUrl
+ * @returns {string}
+ */
 export function titleFromLocalPdfFilename(fileUrl) {
   const url = new URL(fileUrl);
-  const encodedFilename = url.pathname.split("/").at(-1);
+  const encodedFilename = /** @type {string} */ (url.pathname.split("/").at(-1));
   const decodedFilename = removeUnsafeFilenameFormatting(
     decodeURIComponent(encodedFilename).normalize("NFC"),
   );
@@ -79,6 +105,11 @@ export function titleFromLocalPdfFilename(fileUrl) {
   return hasMeaningfulTitleContent(title) ? title : "untitled";
 }
 
+/**
+ * @param {unknown} metadataResult
+ * @param {string} fileUrl
+ * @returns {string}
+ */
 export function resolveAutomaticBookTitle(metadataResult, fileUrl) {
   return titleFromPdfMetadata(metadataResult) ?? titleFromLocalPdfFilename(fileUrl);
 }

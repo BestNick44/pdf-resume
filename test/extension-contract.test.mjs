@@ -176,7 +176,7 @@ test("type checking explains how to install a missing local compiler", async (t)
   );
 });
 
-test("project discovery is the only JavaScript file opted into type checking", async () => {
+test("phase two JavaScript files are opted into type checking", async () => {
   const checkedFiles = [];
 
   for (const filePath of await discoverAppJavaScriptFiles(projectRoot)) {
@@ -185,7 +185,14 @@ test("project discovery is the only JavaScript file opted into type checking", a
     }
   }
 
-  assert.deepEqual(checkedFiles, [path.join("scripts", "project-discovery.mjs")]);
+  assert.deepEqual(checkedFiles, [
+    path.join("scripts", "check-format.mjs"),
+    path.join("scripts", "check-syntax.mjs"),
+    path.join("scripts", "check-types.mjs"),
+    path.join("scripts", "project-discovery.mjs"),
+    path.join("scripts", "run-tests.mjs"),
+    path.join("shared", "book-title.mjs"),
+  ]);
 });
 
 test("every manifest entry point is a packaged regular file", async () => {
