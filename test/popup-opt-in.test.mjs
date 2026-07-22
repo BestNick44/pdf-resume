@@ -199,6 +199,40 @@ test("popup replaces only an untracked PDF action with file access instructions"
   assert.equal(startedTabOperations(harness.fake, "update").length, 0);
 });
 
+test("popup starts book lookup and file-access check before either resolves", async () => {
+  const harness = createHarness();
+  const heldBookLookup = harness.fake.storageFake.holdNext("get");
+  const heldFileAccessCheck = harness.holdFileSchemeAccessCheck(1);
+
+  const popupStart = harness.app.start();
+  try {
+    await heldBookLookup.started;
+    assert.equal(
+      harness.fileSchemeAccessChecks,
+      1,
+      "file-access check should start while the book lookup is held",
+    );
+    await heldFileAccessCheck.started;
+    assert.equal(
+      harness.fake.storageFake.operations.some(
+        ({ method, phase }) => method === "get" && phase === "finish",
+      ),
+      false,
+    );
+    assert.deepEqual(harness.view.calls, [["loading"]]);
+  } finally {
+    heldBookLookup.release();
+    heldFileAccessCheck.release(true);
+    await popupStart;
+  }
+
+  assert.equal(harness.fileSchemeAccessChecks, 1);
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "untracked",
+    { filename: "A Book", actionLabel: "Track this book" },
+  ]);
+});
+
 test("popup open queries the actual active tab and presents an untracked local PDF without side effects", async () => {
   const harness = createHarness();
 
