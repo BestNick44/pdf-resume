@@ -147,26 +147,38 @@ function waitForTargetPage({
 
 /**
  * @param {FrameScheduler} scheduler
+ * @returns {{
+ *   requestFrame: (callback: FrameRequestCallback) => FrameHandle,
+ *   cancelFrame: (handle: FrameHandle) => void,
+ * }}
+ */
+function frameScheduling(scheduler) {
+  /** @type {(callback: FrameRequestCallback) => FrameHandle} */
+  const requestFrame =
+    typeof scheduler.requestAnimationFrame === "function"
+      ? scheduler.requestAnimationFrame.bind(scheduler)
+      : (callback) =>
+          scheduler.setTimeout(/** @type {() => void} */ (callback), 16);
+  /** @type {(handle: FrameHandle) => void} */
+  const cancelFrame =
+    typeof scheduler.cancelAnimationFrame === "function"
+      ? /** @type {(handle: FrameHandle) => void} */ (
+          scheduler.cancelAnimationFrame.bind(scheduler)
+        )
+      : /** @type {(handle: FrameHandle) => void} */ (
+          scheduler.clearTimeout.bind(scheduler)
+        );
+  return { requestFrame, cancelFrame };
+}
+
+/**
+ * @param {FrameScheduler} scheduler
  * @param {AbortSignal} signal
  * @returns {Promise<boolean>}
  */
 function waitForLayout(scheduler, signal) {
   return new Promise((resolve) => {
-    /** @type {(callback: FrameRequestCallback) => FrameHandle} */
-    const requestFrame =
-      typeof scheduler.requestAnimationFrame === "function"
-        ? scheduler.requestAnimationFrame.bind(scheduler)
-        : (callback) =>
-            scheduler.setTimeout(/** @type {() => void} */ (callback), 16);
-    /** @type {(handle: FrameHandle) => void} */
-    const cancelFrame =
-      typeof scheduler.cancelAnimationFrame === "function"
-        ? /** @type {(handle: FrameHandle) => void} */ (
-            scheduler.cancelAnimationFrame.bind(scheduler)
-          )
-        : /** @type {(handle: FrameHandle) => void} */ (
-            scheduler.clearTimeout.bind(scheduler)
-          );
+    const { requestFrame, cancelFrame } = frameScheduling(scheduler);
     /** @type {FrameHandle | undefined} */
     let frame;
     let settled = false;
@@ -272,59 +284,129 @@ function waitForInitialView({ application, eventBus, scheduler, signal }) {
 }
 
 /**
- * @param {PdfJsPdfViewer} pdfViewer
- * @param {TimerScheduler} scheduler
- * @param {AbortSignal} signal
+ * Holds the freshly applied restore against late PDF.js-driven navigation.
+ *
+ * PDF.js 6.1.200 exposes no signal meaning "the final possible initial view
+ * has been applied": after `documentinit` it awaits
+ * `Promise.race([pagesPromise, 10 s])` and may call `setInitialView` again for
+ * unequal page sizes, and hash/OpenAction destinations resolve asynchronously
+ * and can land later still. So instead of ordering the restore after all
+ * built-in navigation, this defends it: any displacement that occurs without
+ * genuine user interaction is re-asserted, until the earliest of genuine
+ * interaction, `pagesPromise` settling plus one layout frame (the second
+ * `setInitialView` pass runs in that promise's continuation), or the bounded
+ * app-owned timeout. Resolves false only when the restore was torn down.
+ *
+ * @param {{
+ *   container: HTMLElement,
+ *   eventBus: PdfJsEventBus,
+ *   interaction: PdfJsRestoreInteraction,
+ *   pdfViewer: PdfJsPdfViewer,
+ *   isDisplaced: () => boolean,
+ *   reassert: () => void,
+ *   scheduler: FrameScheduler,
+ *   signal: AbortSignal,
+ * }} options
  * @returns {Promise<boolean>}
  */
-function waitForPages(pdfViewer, scheduler, signal) {
-  const pagesPromise = pdfViewer.pagesPromise;
-  if (!pagesPromise || typeof pagesPromise.then !== "function") {
-    return Promise.resolve(true);
-  }
-
-  return new Promise((resolve, reject) => {
+function defendRestoredPosition({
+  container,
+  eventBus,
+  interaction,
+  pdfViewer,
+  isDisplaced,
+  reassert,
+  scheduler,
+  signal,
+}) {
+  return new Promise((resolve) => {
+    const { requestFrame, cancelFrame } = frameScheduling(scheduler);
     let settled = false;
+    let reasserting = false;
     /** @type {ReturnType<TimerScheduler["setTimeout"]> | undefined} */
-    let timer;
+    let capTimer;
+    /** @type {FrameHandle | undefined} */
+    let settleFrame;
 
-    /**
-     * @param {unknown} [error]
-     * @param {boolean} [ready]
-     */
-    function finish(error, ready = true) {
+    /** @param {boolean} defended */
+    function finish(defended) {
       if (settled) {
         return;
       }
       settled = true;
       scheduler.clearTimeout(
-        /** @type {ReturnType<TimerScheduler["setTimeout"]>} */ (timer),
+        /** @type {ReturnType<TimerScheduler["setTimeout"]>} */ (capTimer),
       );
-      signal.removeEventListener("abort", onAbort);
-      if (error) {
-        reject(error);
-      } else {
-        resolve(ready);
+      if (settleFrame !== undefined) {
+        cancelFrame(settleFrame);
       }
+      eventBus.off("pagechanging", onPositionEvent);
+      eventBus.off("updateviewarea", onPositionEvent);
+      container.removeEventListener("scroll", holdPosition);
+      signal.removeEventListener("abort", onAbort);
+      resolve(defended);
     }
 
     function onAbort() {
-      finish(undefined, false);
+      finish(false);
     }
 
+    function holdPosition() {
+      if (settled || reasserting) {
+        return;
+      }
+      if (interaction.hasGenuineInteraction()) {
+        finish(true);
+        return;
+      }
+      if (!isDisplaced()) {
+        return;
+      }
+      reasserting = true;
+      try {
+        reassert();
+      } finally {
+        reasserting = false;
+      }
+    }
+
+    /** @param {PdfJsSourceEvent} [event] */
+    function onPositionEvent({ source } = {}) {
+      if (source === pdfViewer) {
+        holdPosition();
+      }
+    }
+
+    eventBus.on("pagechanging", onPositionEvent);
+    eventBus.on("updateviewarea", onPositionEvent);
+    container.addEventListener("scroll", holdPosition, { passive: true });
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) {
-      finish(undefined, false);
+      finish(false);
       return;
     }
-    timer = scheduler.setTimeout(
-      () => finish(),
+    capTimer = scheduler.setTimeout(
+      () => finish(true),
       PDF_JS_INITIAL_VIEW_TIMEOUT_MILLISECONDS,
     );
-    Promise.resolve(pagesPromise).then(
-      () => finish(),
-      (error) => finish(error),
-    );
+    const pagesPromise = pdfViewer.pagesPromise;
+    const pagesSettled =
+      pagesPromise && typeof pagesPromise.then === "function"
+        ? Promise.resolve(pagesPromise).then(
+            () => {},
+            () => {},
+          )
+        : Promise.resolve();
+    pagesSettled.then(() => {
+      if (settled) {
+        return;
+      }
+      settleFrame = requestFrame(() => {
+        settleFrame = undefined;
+        holdPosition();
+        finish(true);
+      });
+    });
   });
 }
 
@@ -717,6 +799,13 @@ export async function restorePdfJsPosition({
     if (signal?.aborted || !isCurrent()) {
       return undefined;
     }
+    // Readiness signal (amended issue #29): `documentinit`, or an initial view
+    // that is already set. PDF.js dispatches `documentinit` immediately after
+    // its primary `setInitialView` pass, so stored history / the OpenAction
+    // hash has been dispatched by then. This deliberately does NOT wait for
+    // `pagesPromise`: restore latency must scale with the target page, not the
+    // total page count. Built-in navigation that lands after this signal is
+    // handled by `defendRestoredPosition` below, not by waiting longer here.
     if (
       !(await waitForInitialView({
         application,
@@ -724,7 +813,6 @@ export async function restorePdfJsPosition({
         scheduler,
         signal: active.signal,
       })) ||
-      !(await waitForPages(application.pdfViewer, scheduler, active.signal)) ||
       !(await waitForLayout(scheduler, active.signal)) ||
       !isCurrent()
     ) {
@@ -811,6 +899,19 @@ export async function restorePdfJsPosition({
       return handoffPosition;
     }
 
+    const applyRestoredPosition = () => {
+      if (application.pdfViewer.currentPageNumber !== pageNumber) {
+        application.pdfViewer.currentPageNumber = pageNumber;
+      }
+      if (clampRestoredPosition()) {
+        container.scrollTop = restoredPosition.scrollTop;
+      }
+      restoredPosition.scrollTop = currentPosition(
+        application,
+        container,
+        pagesCount,
+      ).scrollTop;
+    };
     const bounds = clampRestoredPosition();
     if (bounds) {
       const restoreScroll = () => {
@@ -828,7 +929,25 @@ export async function restorePdfJsPosition({
       pagesCount,
     ).scrollTop;
 
-    if (!(await waitForLayout(scheduler, active.signal)) || !isCurrent()) {
+    const defended = await defendRestoredPosition({
+      container,
+      eventBus,
+      interaction,
+      pdfViewer: application.pdfViewer,
+      isDisplaced: () =>
+        application.pdfViewer.currentPageNumber !== pageNumber ||
+        container.scrollTop !== restoredPosition.scrollTop,
+      reassert() {
+        if (typeof interaction.runWithoutObserving === "function") {
+          interaction.runWithoutObserving(applyRestoredPosition);
+        } else {
+          applyRestoredPosition();
+        }
+      },
+      scheduler,
+      signal: active.signal,
+    });
+    if (!defended || !isCurrent()) {
       return undefined;
     }
     const handoffPosition = currentPosition(application, container, pagesCount);

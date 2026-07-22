@@ -63,6 +63,7 @@ function createRestoreHarness({
   }));
   let currentPageNumber = initialPage;
   let scrollTop = initialScrollTop;
+  const scrollListeners = new Set();
   const container = {
     clientHeight,
     scrollHeight,
@@ -71,6 +72,21 @@ function createRestoreHarness({
     },
     set scrollTop(value) {
       scrollTop = value;
+    },
+    addEventListener(type, listener) {
+      if (type === "scroll") {
+        scrollListeners.add(listener);
+      }
+    },
+    removeEventListener(type, listener) {
+      if (type === "scroll") {
+        scrollListeners.delete(listener);
+      }
+    },
+    dispatchScroll() {
+      for (const listener of [...scrollListeners]) {
+        listener();
+      }
     },
   };
   const navigation = [];
@@ -229,7 +245,7 @@ test("saved offsets clamp against target-page geometry after rendering", async (
   });
 });
 
-test("late PDF.js initial-view changes finish before app-owned restore navigation", async () => {
+test("a late history-driven navigation after the readiness signal does not displace the restored position", async () => {
   const pages = deferred();
   const harness = createRestoreHarness({
     initialViewReady: false,
@@ -238,44 +254,85 @@ test("late PDF.js initial-view changes finish before app-owned restore navigatio
   const restored = harness.start({ currentPage: 7, scrollTop: 700 });
   await drainMicrotasks();
 
-  assert.deepEqual(harness.navigation, []);
+  assert.deepEqual(harness.navigation, [], "restore waits for the readiness signal");
   harness.application.pdfViewer.currentPageNumber = 2;
   harness.application.isInitialViewSet = true;
   harness.eventBus.dispatch("documentinit", { source: harness.application });
+  await drainMicrotasks();
+  await harness.advanceLayoutTurn();
+  assert.deepEqual(harness.navigation, [2, 7], "restore navigates without waiting for page proxies");
+
+  await harness.render(7);
+  await harness.advanceLayoutTurn();
+  assert.equal(harness.container.scrollTop, 700);
+
+  harness.application.pdfViewer.currentPageNumber = 3;
+  assert.equal(harness.application.pdfViewer.currentPageNumber, 7, "a mid-window navigation is re-asserted");
+  assert.equal(harness.container.scrollTop, 700, "the restored offset is re-asserted");
+  assert.deepEqual(harness.navigation, [2, 7, 3, 7]);
+
   pages.promise.then(() => {
-    harness.application.pdfViewer.currentPageNumber = 3;
+    harness.application.pdfViewer.currentPageNumber = 4;
   });
   pages.resolve();
   await drainMicrotasks();
-
-  assert.deepEqual(harness.navigation, [2, 3], "restore waits through both initial views");
-  await harness.advanceLayoutTurn();
-  assert.deepEqual(harness.navigation, [2, 3, 7]);
-  await harness.render(7);
-  await harness.advanceLayoutTurn();
+  assert.equal(harness.application.pdfViewer.currentPageNumber, 7, "the second initial-view pass is re-asserted");
+  assert.equal(harness.container.scrollTop, 700);
   await harness.advanceLayoutTurn();
   await restored;
+
   assert.equal(harness.application.pdfViewer.currentPageNumber, 7);
+  assert.equal(harness.container.scrollTop, 700);
+  assert.deepEqual(harness.starts, [{ currentPage: 7, scrollTop: 700 }]);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.eventBus.listenerCount("updateviewarea"), 0);
+  assert.equal(harness.time.pendingCount(), 0);
 });
 
-test("pages readiness is bounded for a huge or lazy document", async () => {
+test("restore completes even when pagesPromise never resolves within the timeout window", async () => {
   const pages = deferred();
   const harness = createRestoreHarness({ pagesReady: pages.promise });
   const restored = harness.start({ currentPage: 6, scrollTop: 600 });
   await drainMicrotasks();
 
-  harness.time.advanceBy(9_999);
-  await drainMicrotasks();
-  assert.deepEqual(harness.navigation, []);
-  harness.time.advanceBy(1);
-  await drainMicrotasks();
-  assert.deepEqual(harness.navigation, []);
   await harness.advanceLayoutTurn();
-  assert.deepEqual(harness.navigation, [6]);
+  assert.deepEqual(harness.navigation, [6], "navigation must not wait for page proxies");
   await harness.render(6);
   await harness.advanceLayoutTurn();
-  await harness.advanceLayoutTurn();
+  assert.equal(harness.container.scrollTop, 600, "the offset is restored without page proxies");
+  assert.deepEqual(harness.starts, [], "the defense window is still open");
+
+  harness.time.advanceBy(10_000);
+  await drainMicrotasks();
   await restored;
+
+  assert.deepEqual(harness.starts, [{ currentPage: 6, scrollTop: 600 }]);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.eventBus.listenerCount("updateviewarea"), 0);
+  assert.equal(harness.time.pendingCount(), 0);
+});
+
+test("restore waits for the target page's render, not other pages", async () => {
+  const pages = deferred();
+  const harness = createRestoreHarness({ pagesReady: pages.promise });
+  const restored = harness.start({ currentPage: 6, scrollTop: 600 });
+  await drainMicrotasks();
+  await harness.advanceLayoutTurn();
+  assert.deepEqual(harness.navigation, [6]);
+
+  await harness.render(3);
+  await harness.advanceLayoutTurn();
+  assert.equal(harness.container.scrollTop, 5_000, "an unrelated page render is not target readiness");
+  assert.deepEqual(harness.starts, []);
+
+  await harness.render(6);
+  await harness.advanceLayoutTurn();
+  assert.equal(harness.container.scrollTop, 600);
+  harness.time.advanceBy(10_000);
+  await drainMicrotasks();
+  await restored;
+
+  assert.deepEqual(harness.starts, [{ currentPage: 6, scrollTop: 600 }]);
 });
 
 test("page-only and scroll-only saved values are both honored", async (t) => {
