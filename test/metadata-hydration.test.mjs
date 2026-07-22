@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { BooksStorageDataError, createBooksStorage } from "../storage/books.mjs";
 import {
-  normalizePdfMetadataTitle,
   resolveAutomaticBookTitle,
   titleFromLocalPdfFilename,
 } from "../shared/book-title.mjs";
@@ -133,9 +132,24 @@ test("meaningful PDF Title wins without rewriting Unicode, punctuation, or emoji
     ),
     "L’été — 日本語: v1.2",
   );
-  assert.equal(normalizePdfMetadataTitle("Cafe\u0301"), "Café");
-  assert.equal(normalizePdfMetadataTitle("Title: a punctuation test"), "Title: a punctuation test");
-  assert.equal(normalizePdfMetadataTitle("👩‍💻 — release_v1.2!"), "👩‍💻 — release_v1.2!");
+  assert.equal(
+    resolveAutomaticBookTitle({ info: { Title: "Cafe\u0301" } }, BOOK_URL),
+    "Café",
+  );
+  assert.equal(
+    resolveAutomaticBookTitle(
+      { info: { Title: "Title: a punctuation test" } },
+      BOOK_URL,
+    ),
+    "Title: a punctuation test",
+  );
+  assert.equal(
+    resolveAutomaticBookTitle(
+      { info: { Title: "👩‍💻 — release_v1.2!" } },
+      BOOK_URL,
+    ),
+    "👩‍💻 — release_v1.2!",
+  );
 });
 
 test("separator-noise, invisible, control, URL, and path metadata titles use the filename", () => {

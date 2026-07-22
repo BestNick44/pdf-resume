@@ -42,7 +42,7 @@ function hasMeaningfulTitleContent(value) {
  * @param {unknown} value
  * @returns {string | undefined}
  */
-export function normalizePdfMetadataTitle(value) {
+function normalizePdfMetadataTitle(value) {
   if (typeof value !== "string" || UNSAFE_TITLE_CHARACTERS.test(value)) {
     return undefined;
   }
@@ -63,7 +63,7 @@ export function normalizePdfMetadataTitle(value) {
  * @param {unknown} metadataResult
  * @returns {string | undefined}
  */
-export function titleFromPdfMetadata(metadataResult) {
+function titleFromPdfMetadata(metadataResult) {
   if (
     metadataResult === null ||
     typeof metadataResult !== "object" ||
