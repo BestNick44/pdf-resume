@@ -23,7 +23,6 @@ import {
 /** @typedef {Partial<Pick<BookRecord, "title" | "customTitle" | "totalPages">>} UpsertPatch */
 /** @typedef {Pick<BookRecord, "title" | "totalPages">} HydrationPatch */
 /** @typedef {Partial<Pick<BookRecord, "currentPage" | "scrollTop">>} PositionPatch */
-/** @typedef {{ observedAt: number }} PositionOptions */
 /** @typedef {{ book: BookRecord, trackingGeneration: string }} PositionTrackingState */
 /** @typedef {{ legacy: PositionObservation, current?: undefined } | { legacy?: undefined, current: PositionOrderEntry }} RelevantPositionOrder */
 /**
@@ -48,7 +47,6 @@ import {
  *   removeBook(fileUrl: string): Promise<boolean>,
  *   updatePendingPositionObservation(fileUrl: string, patch: PositionPatch, observation: PositionObservation): Promise<StorageMutationStatus>,
  *   updatePositionObservation(fileUrl: string, patch: PositionPatch, observation: PositionObservation, trackingGeneration: string): Promise<StorageMutationStatus>,
- *   updatePosition(fileUrl: string, patch: PositionPatch, options?: PositionOptions): Promise<BookRecord | undefined>,
  * }} BooksStorage
  */
 
@@ -69,7 +67,6 @@ const TRACK_FIELDS = new Set(["title"]);
 const UPSERT_FIELDS = new Set(["title", "customTitle", "totalPages"]);
 const HYDRATION_FIELDS = new Set(["title", "totalPages"]);
 const POSITION_FIELDS = new Set(["currentPage", "scrollTop"]);
-const POSITION_OPTION_FIELDS = new Set(["observedAt"]);
 const POSITION_ORDER_VERSION = 2;
 const MAX_VIEWERS_PER_GENERATION = 64;
 const POSITION_ORDER_FIELDS = ["version", "generation", "winner", "viewers"];
@@ -317,34 +314,6 @@ function validatePositionPatch(patch) {
     validateField(field, value);
   }
   return /** @type {PositionPatch} */ (Object.fromEntries(entries));
-}
-
-/**
- * @param {unknown} options
- * @returns {number | undefined}
- */
-function validatePositionOptions(options) {
-  if (options === undefined) {
-    return undefined;
-  }
-  const entries = ownDataEntries(
-    options,
-    POSITION_OPTION_FIELDS,
-    "position update options",
-  );
-  if (entries.length !== 1 || entries[0][0] !== "observedAt") {
-    throw new TypeError("position update options must include only observedAt");
-  }
-  const observedAt = entries[0][1];
-  if (
-    !Number.isSafeInteger(/** @type {number} */ (observedAt)) ||
-    /** @type {number} */ (observedAt) < 0
-  ) {
-    throw new TypeError(
-      "observedAt must be a non-negative integer Unix millisecond timestamp",
-    );
-  }
-  return /** @type {number} */ (observedAt);
 }
 
 /** @param {unknown} signal */
@@ -1196,62 +1165,6 @@ export function createBooksStorage({
       });
     },
 
-    async updatePosition(fileUrl, patch, options) {
-      const canonicalUrl = canonicalFileUrl(fileUrl);
-      const validPatch = validatePositionPatch(patch);
-      const observedAt = validatePositionOptions(options);
-      if (
-        observedAt !== undefined &&
-        observedAt > currentMilliseconds(millisecondsNow)
-      ) {
-        throw new TypeError("observedAt must not be in the future");
-      }
-      return mutate(async () => {
-        const { books, positionOrder } = await loadOrderedState();
-        const relevantOrder = readRelevantPositionOrder(
-          positionOrder,
-          canonicalUrl,
-        );
-        const existing = books[canonicalUrl];
-        if (!existing) {
-          return undefined;
-        }
-        const writeTime = observedAt ?? currentMilliseconds(millisecondsNow);
-        const observedTimestamp = Math.floor(writeTime / 1_000);
-        if (
-          observedAt !== undefined &&
-          observedTimestamp < existing.lastReadAt
-        ) {
-          return clone(existing);
-        }
-
-        const currentOrder = positionOrderFrom(
-          relevantOrder,
-          relevantOrder?.current?.generation ?? newTrackingGeneration(),
-        );
-        const effectiveTime = Math.max(
-          writeTime,
-          currentOrder.winner?.effectiveTime ?? 0,
-        );
-        currentOrder.winner = {
-          effectiveTime,
-          viewerId: null,
-          sequence: 0,
-        };
-        const updated = {
-          ...existing,
-          ...validPatch,
-          lastReadAt: Math.max(existing.lastReadAt, observedTimestamp),
-        };
-        positionOrder[canonicalUrl] = currentOrder;
-        books[canonicalUrl] = updated;
-        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
-          [BOOKS_KEY]: books,
-          [POSITION_ORDER_KEY]: positionOrder,
-        });
-        return clone(updated);
-      });
-    },
   });
 }
 
@@ -1317,15 +1230,6 @@ export async function removeBook(fileUrl) {
 /** @returns {Promise<Array<{ fileUrl: string, book: BookRecord }>>} */
 export async function listBooks() {
   return defaultStorage().listBooks();
-}
-
-/**
- * @param {string} fileUrl
- * @param {PositionPatch} patch
- * @param {PositionOptions} [options]
- */
-export async function updatePosition(fileUrl, patch, options) {
-  return defaultStorage().updatePosition(fileUrl, patch, options);
 }
 
 /**
