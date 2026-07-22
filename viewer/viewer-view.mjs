@@ -1,6 +1,13 @@
 // @ts-check
 
 /**
+ * @typedef {{
+ *   initializedPromise: PromiseLike<unknown>,
+ *   open: (options: { url: string, originalUrl: string }) => PromiseLike<unknown>,
+ * }} OpenablePdfJsApplication
+ */
+
+/**
  * @param {{
  *   frame: HTMLIFrameElement,
  *   errorPanel: HTMLElement,
@@ -18,6 +25,9 @@ export function createViewerView({
   warningPanel,
   warningMessage,
 }) {
+  /** @type {Promise<void> | undefined} */
+  let frameLoaded;
+
   function hideFileAccessInstructions() {
     if (fileAccessInstructions) {
       fileAccessInstructions.hidden = true;
@@ -55,9 +65,36 @@ export function createViewerView({
       errorPanel.hidden = true;
       hideFileAccessInstructions();
       hideWarning();
-      frame.addEventListener("load", () => frame.focus(), { once: true });
+      frameLoaded = new Promise((resolve) => {
+        frame.addEventListener(
+          "load",
+          () => {
+            frame.focus();
+            resolve();
+          },
+          { once: true },
+        );
+      });
       frame.src = viewerUrl.href;
       frame.hidden = false;
+    },
+    /**
+     * @param {string} url
+     * @param {string} originalUrl
+     */
+    async openDocument(url, originalUrl) {
+      await frameLoaded;
+      const frameWindow = /** @type {import("../types/pdfjs.d.ts").PdfJsWindow | null} */ (
+        frame.contentWindow
+      );
+      const application = /** @type {OpenablePdfJsApplication | undefined} */ (
+        /** @type {unknown} */ (frameWindow?.PDFViewerApplication)
+      );
+      if (!application?.initializedPromise || typeof application.open !== "function") {
+        throw new Error("PDF.js application is unavailable.");
+      }
+      await application.initializedPromise;
+      await application.open({ url, originalUrl });
     },
     /** @param {string} message */
     showWarning(message) {

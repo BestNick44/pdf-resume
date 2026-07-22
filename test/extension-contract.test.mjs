@@ -441,6 +441,54 @@ test("viewer shell is accessible and keeps local input out of markup", async () 
   assert.doesNotMatch(viewer, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
 });
 
+test("variant A boots the PDF.js shell before the PDF fetch settles", async () => {
+  const { bootViewer } = await import("../viewer/viewer-boot.mjs");
+  let releaseFetch;
+  const fetchPending = new Promise((resolve) => {
+    releaseFetch = resolve;
+  });
+  const shownViewerUrls = [];
+  const openedDocuments = [];
+
+  const bootPending = bootViewer({
+    search: `?file=${encodeURIComponent("file:///tmp/book.pdf")}`,
+    fetchPdf: async () => fetchPending,
+    createObjectUrl: () => "blob:prototype",
+    isFileSchemeAccessAllowed: async () => true,
+    pdfJsViewerUrl: new URL(
+      "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+    ),
+    view: {
+      showError: assert.fail,
+      showFileAccessInstructions: assert.fail,
+      showViewer(viewerUrl) {
+        shownViewerUrls.push(viewerUrl.href);
+      },
+      async openDocument(url, originalUrl) {
+        openedDocuments.push([url, originalUrl]);
+      },
+    },
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(shownViewerUrls, [
+    "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+  ]);
+  assert.deepEqual(openedDocuments, []);
+
+  releaseFetch({
+    ok: true,
+    blob: async () => new Blob(["%PDF-1.7\n"]),
+  });
+  assert.deepEqual(await bootPending, {
+    fileUrl: "file:///tmp/book.pdf",
+    objectUrl: "blob:prototype",
+  });
+  assert.deepEqual(openedDocuments, [
+    ["blob:prototype", "file:///tmp/book.pdf"],
+  ]);
+});
+
 test("viewer boot displays a valid local PDF through the packaged PDF.js viewer", async () => {
   const { bootViewer } = await import("../viewer/viewer-boot.mjs");
   const { createViewerView } = await import("../viewer/viewer-view.mjs");
@@ -450,9 +498,18 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
   let loadListener;
   let loadOptions;
   let focusCalls = 0;
+  const openCalls = [];
   const frame = {
     hidden: true,
     src: "",
+    contentWindow: {
+      PDFViewerApplication: {
+        initializedPromise: Promise.resolve(),
+        async open(options) {
+          openCalls.push(options);
+        },
+      },
+    },
     addEventListener(type, listener, options) {
       assert.equal(type, "load");
       loadListener = listener;
@@ -467,7 +524,7 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
   const objectUrl = "blob:chrome-extension://abcdefghijkl/document-id";
   const search = `?file=${encodeURIComponent("file:///tmp/My Book.pdf")}`;
 
-  const result = await bootViewer({
+  const resultPending = bootViewer({
     search,
     fetchPdf: async (...args) => {
       fetchCalls.push(args);
@@ -483,6 +540,11 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
     ),
     view: createViewerView({ frame, errorPanel, errorMessage }),
   });
+
+  await Promise.resolve();
+  assert.equal(focusCalls, 0);
+  loadListener();
+  const result = await resultPending;
 
   assert.deepEqual(result, {
     fileUrl: "file:///tmp/My%20Book.pdf",
@@ -503,14 +565,14 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
   assert.equal(displayedUrl.protocol, "chrome-extension:");
   assert.equal(displayedUrl.hostname, "abcdefghijkl");
   assert.equal(displayedUrl.pathname, "/viewer/pdfjs/web/viewer.html");
-  assert.equal(
-    displayedUrl.searchParams.get("file"),
-    `${objectUrl}#My%20Book.pdf`,
-  );
-  assert.doesNotMatch(displayedUrl.href, /file:/);
+  assert.equal(displayedUrl.search, "");
+  assert.deepEqual(openCalls, [
+    {
+      url: objectUrl,
+      originalUrl: "file:///tmp/My%20Book.pdf",
+    },
+  ]);
   assert.deepEqual(loadOptions, { once: true });
-  assert.equal(focusCalls, 0);
-  loadListener();
   assert.equal(focusCalls, 1);
 });
 
@@ -595,8 +657,9 @@ test("viewer boot rejects bad signatures and presents local read failures", asyn
       const frame = {
         hidden: true,
         src: "",
-        addEventListener() {
-          assert.fail("a rejected file must not register a viewer load handler");
+        addEventListener(type, _listener, options) {
+          assert.equal(type, "load");
+          assert.deepEqual(options, { once: true });
         },
       };
       const errorPanel = { hidden: true };
@@ -619,7 +682,10 @@ test("viewer boot rejects bad signatures and presents local read failures", asyn
       assert.equal(result, undefined);
       assert.equal(objectUrlCalls, 0);
       assert.equal(frame.hidden, true);
-      assert.equal(frame.src, "");
+      assert.equal(
+        frame.src,
+        "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+      );
       assert.equal(errorPanel.hidden, false);
       assert.equal(errorMessage.textContent, testCase.message);
     });

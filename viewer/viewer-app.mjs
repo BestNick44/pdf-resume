@@ -35,6 +35,7 @@ import { installViewerStartupPrototypeMeasurements } from "./viewer-startup-prot
  *   showError: (message: string) => void,
  *   showFileAccessInstructions: () => void,
  *   showViewer: (viewerUrl: URL) => void,
+ *   openDocument: (url: string, originalUrl: string) => Promise<void>,
  *   showWarning: (message: string, error?: unknown) => void,
  * }} ViewerView
  */

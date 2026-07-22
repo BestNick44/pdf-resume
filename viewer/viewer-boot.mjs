@@ -1,10 +1,6 @@
 // @ts-check
 
-import {
-  buildPdfJsViewerUrl,
-  parseViewerFileQuery,
-  ViewerInputError,
-} from "./viewer-url.mjs";
+import { parseViewerFileQuery, ViewerInputError } from "./viewer-url.mjs";
 
 /** @typedef {ReturnType<typeof import("./viewer-view.mjs").createViewerView>} ViewerView */
 /** @typedef {{ fileUrl: string, objectUrl: string }} BootedViewer */
@@ -38,6 +34,7 @@ export async function bootViewer({
       return undefined;
     }
 
+    view.showViewer(pdfJsViewerUrl);
     const response = await fetchPdf(fileUrl.href, {
       cache: "no-store",
       credentials: "omit",
@@ -55,7 +52,7 @@ export async function bootViewer({
     }
 
     const objectUrl = createObjectUrl(pdfBlob);
-    view.showViewer(buildPdfJsViewerUrl(objectUrl, fileUrl, pdfJsViewerUrl));
+    await view.openDocument(objectUrl, fileUrl.href);
     return { fileUrl: fileUrl.href, objectUrl };
   } catch (error) {
     view.showError(
