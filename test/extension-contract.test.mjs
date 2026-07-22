@@ -176,7 +176,7 @@ test("type checking explains how to install a missing local compiler", async (t)
   );
 });
 
-test("phase two JavaScript files are opted into type checking", async () => {
+test("phase three JavaScript files are opted into type checking", async () => {
   const checkedFiles = [];
 
   for (const filePath of await discoverAppJavaScriptFiles(projectRoot)) {
@@ -192,6 +192,8 @@ test("phase two JavaScript files are opted into type checking", async () => {
     path.join("scripts", "project-discovery.mjs"),
     path.join("scripts", "run-tests.mjs"),
     path.join("shared", "book-title.mjs"),
+    path.join("shared", "position-update-messaging.mjs"),
+    path.join("storage", "books.mjs"),
   ]);
 });
 

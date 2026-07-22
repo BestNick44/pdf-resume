@@ -1,8 +1,51 @@
+// @ts-check
+
 import { canonicalizeLocalPdfUrl } from "../shared/local-pdf-url.mjs";
 import {
   validPositionObservation,
   validPositionTrackingGeneration,
 } from "../shared/position-update-messaging.mjs";
+
+/** @typedef {import("../types/storage.d.ts").BookRecord} BookRecord */
+/** @typedef {import("../types/storage.d.ts").PositionObservation} PositionObservation */
+/** @typedef {import("../types/storage.d.ts").PositionOrderEntry} PositionOrderEntry */
+/** @typedef {import("../types/storage.d.ts").PositionWinner} PositionWinner */
+/** @typedef {import("../types/storage.d.ts").StorageMutationStatus} StorageMutationStatus */
+/** @typedef {import("../types/storage.d.ts").ViewerHighWaterMark} ViewerHighWaterMark */
+/** @typedef {Record<string, BookRecord>} BooksMap */
+/** @typedef {Record<string, unknown>} PositionOrderMap */
+/** @typedef {Pick<BookRecord, "title">} TrackPatch */
+/** @typedef {Partial<Pick<BookRecord, "title" | "customTitle" | "totalPages">>} UpsertPatch */
+/** @typedef {Pick<BookRecord, "title" | "totalPages">} HydrationPatch */
+/** @typedef {Partial<Pick<BookRecord, "currentPage" | "scrollTop">>} PositionPatch */
+/** @typedef {{ observedAt: number }} PositionOptions */
+/** @typedef {{ book: BookRecord, trackingGeneration: string }} PositionTrackingState */
+/** @typedef {{ legacy: PositionObservation, current?: undefined } | { legacy?: undefined, current: PositionOrderEntry }} RelevantPositionOrder */
+/**
+ * @typedef {{
+ *   storageArea?: Pick<chrome.storage.StorageArea, "get" | "set">,
+ *   lockManager?: Pick<LockManager, "request">,
+ *   now?: () => number,
+ *   nowMilliseconds?: () => number,
+ *   createTrackingGeneration?: () => unknown,
+ *   createLockTimeoutSignal?: (milliseconds: number) => AbortSignal,
+ * }} BooksStorageDependencies
+ */
+/**
+ * @typedef {{
+ *   getBook(fileUrl: string): Promise<BookRecord | undefined>,
+ *   listBooks(): Promise<Array<{ fileUrl: string, book: BookRecord }>>,
+ *   getPositionTrackingState(fileUrl: string, viewerId: string): Promise<PositionTrackingState | undefined>,
+ *   trackBook(fileUrl: string, patch: TrackPatch): Promise<BookRecord>,
+ *   upsertBook(fileUrl: string, patch: UpsertPatch): Promise<BookRecord>,
+ *   hydrateMetadata(fileUrl: string, patch: HydrationPatch, options?: { signal?: AbortSignal }): Promise<BookRecord | undefined>,
+ *   updateCustomTitle(fileUrl: string, customTitle: string | null): Promise<BookRecord | undefined>,
+ *   removeBook(fileUrl: string): Promise<boolean>,
+ *   updatePendingPositionObservation(fileUrl: string, patch: PositionPatch, observation: PositionObservation): Promise<StorageMutationStatus>,
+ *   updatePositionObservation(fileUrl: string, patch: PositionPatch, observation: PositionObservation, trackingGeneration: string): Promise<StorageMutationStatus>,
+ *   updatePosition(fileUrl: string, patch: PositionPatch, options?: PositionOptions): Promise<BookRecord | undefined>,
+ * }} BooksStorage
+ */
 
 const BOOKS_KEY = "books";
 const POSITION_ORDER_KEY = "positionOrder";
@@ -31,12 +74,17 @@ const defaultNowSeconds = () => Math.floor(Date.now() / 1_000);
 const defaultNowMilliseconds = () => Date.now();
 
 export class BooksStorageDataError extends Error {
+  /** @param {string} message */
   constructor(message) {
     super(message);
     this.name = "BooksStorageDataError";
   }
 }
 
+/**
+ * @param {unknown} value
+ * @returns {value is Record<PropertyKey, unknown>}
+ */
 function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -45,10 +93,18 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+/**
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+  return /** @type {T} */ (
+    value === undefined ? undefined : structuredClone(value)
+  );
 }
 
+/** @param {unknown} value */
 function canonicalFileUrl(value) {
   if (typeof value !== "string") {
     throw new TypeError("book URL must be a string");
@@ -61,6 +117,12 @@ function canonicalFileUrl(value) {
   }
 }
 
+/**
+ * @param {unknown} value
+ * @param {ReadonlySet<string>} allowedFields
+ * @param {string} label
+ * @returns {Array<[string, unknown]>}
+ */
 function ownDataEntries(value, allowedFields, label) {
   if (!isPlainObject(value)) {
     throw new TypeError(`${label} must be a plain object`);
@@ -75,7 +137,9 @@ function ownDataEntries(value, allowedFields, label) {
     if (typeof key !== "string" || !allowedFields.has(key)) {
       throw new TypeError(`${label} contains an unexpected field`);
     }
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    const descriptor = /** @type {PropertyDescriptor} */ (
+      Object.getOwnPropertyDescriptor(value, key)
+    );
     if (!("value" in descriptor)) {
       throw new TypeError(`${label} fields must be data properties`);
     }
@@ -83,42 +147,58 @@ function ownDataEntries(value, allowedFields, label) {
   });
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} field
+ */
 function validateTitle(value, field) {
   if (typeof value !== "string") {
     throw new TypeError(`${field} must be a string`);
   }
 }
 
+/** @param {unknown} value */
 function validateCustomTitle(value) {
   if (value !== null && typeof value !== "string") {
     throw new TypeError("customTitle must be a string or null");
   }
 }
 
+/** @param {unknown} value */
 function validateTotalPages(value) {
-  if (!Number.isInteger(value) || value < 0) {
+  if (!Number.isInteger(value) || /** @type {number} */ (value) < 0) {
     throw new TypeError("totalPages must be a non-negative integer");
   }
 }
 
+/** @param {unknown} value */
 function validateCurrentPage(value) {
-  if (!Number.isInteger(value) || value < 1) {
+  if (!Number.isInteger(value) || /** @type {number} */ (value) < 1) {
     throw new TypeError("currentPage must be a positive integer");
   }
 }
 
+/** @param {unknown} value */
 function validateScrollTop(value) {
-  if (!Number.isFinite(value) || value < 0) {
+  if (!Number.isFinite(value) || /** @type {number} */ (value) < 0) {
     throw new TypeError("scrollTop must be a finite non-negative number");
   }
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} field
+ */
 function validateTimestamp(value, field) {
-  if (!Number.isSafeInteger(value) || value < 0) {
+  if (!Number.isSafeInteger(value) || /** @type {number} */ (value) < 0) {
     throw new TypeError(`${field} must be a non-negative integer timestamp`);
   }
 }
 
+/**
+ * @param {string} field
+ * @param {unknown} value
+ */
 function validateField(field, value) {
   switch (field) {
     case "title":
@@ -145,12 +225,17 @@ function validateField(field, value) {
   }
 }
 
+/** @param {BookRecord} record */
 function validatePageRange(record) {
   if (record.currentPage > record.totalPages) {
     throw new TypeError("currentPage must not exceed totalPages");
   }
 }
 
+/**
+ * @param {unknown} value
+ * @returns {BookRecord}
+ */
 function validateRecord(value) {
   if (!isPlainObject(value)) {
     throw new TypeError("book record must be a plain object");
@@ -164,6 +249,7 @@ function validateRecord(value) {
     throw new TypeError("book record must contain exactly the supported fields");
   }
 
+  /** @type {Record<string, unknown>} */
   const record = {};
   for (const field of RECORD_FIELDS) {
     const descriptor = Object.getOwnPropertyDescriptor(value, field);
@@ -173,29 +259,44 @@ function validateRecord(value) {
     validateField(field, descriptor.value);
     record[field] = descriptor.value;
   }
-  if (record.lastReadAt < record.addedAt) {
+  if (
+    /** @type {number} */ (record.lastReadAt) <
+    /** @type {number} */ (record.addedAt)
+  ) {
     throw new TypeError("lastReadAt must not precede addedAt");
   }
-  return record;
+  return /** @type {BookRecord} */ (/** @type {unknown} */ (record));
 }
 
+/**
+ * @param {unknown} patch
+ * @returns {TrackPatch}
+ */
 function validateTrackPatch(patch) {
   const entries = ownDataEntries(patch, TRACK_FIELDS, "initial book patch");
   if (entries.length !== 1 || entries[0][0] !== "title") {
     throw new TypeError("initial book patch must include only title");
   }
   validateTitle(entries[0][1], "title");
-  return { title: entries[0][1] };
+  return { title: /** @type {string} */ (entries[0][1]) };
 }
 
+/**
+ * @param {unknown} patch
+ * @returns {UpsertPatch}
+ */
 function validateUpsertPatch(patch) {
   const entries = ownDataEntries(patch, UPSERT_FIELDS, "book patch");
   for (const [field, value] of entries) {
     validateField(field, value);
   }
-  return Object.fromEntries(entries);
+  return /** @type {UpsertPatch} */ (Object.fromEntries(entries));
 }
 
+/**
+ * @param {unknown} patch
+ * @returns {HydrationPatch}
+ */
 function validateHydrationPatch(patch) {
   const entries = ownDataEntries(patch, HYDRATION_FIELDS, "metadata patch");
   if (entries.length !== HYDRATION_FIELDS.size) {
@@ -204,21 +305,31 @@ function validateHydrationPatch(patch) {
   for (const [field, value] of entries) {
     validateField(field, value);
   }
-  const validPatch = Object.fromEntries(entries);
+  const validPatch = /** @type {HydrationPatch} */ (
+    Object.fromEntries(entries)
+  );
   if (validPatch.totalPages === 0) {
     throw new TypeError("hydrated totalPages must be positive");
   }
   return validPatch;
 }
 
+/**
+ * @param {unknown} patch
+ * @returns {PositionPatch}
+ */
 function validatePositionPatch(patch) {
   const entries = ownDataEntries(patch, POSITION_FIELDS, "position patch");
   for (const [field, value] of entries) {
     validateField(field, value);
   }
-  return Object.fromEntries(entries);
+  return /** @type {PositionPatch} */ (Object.fromEntries(entries));
 }
 
+/**
+ * @param {unknown} options
+ * @returns {number | undefined}
+ */
 function validatePositionOptions(options) {
   if (options === undefined) {
     return undefined;
@@ -232,25 +343,37 @@ function validatePositionOptions(options) {
     throw new TypeError("position update options must include only observedAt");
   }
   const observedAt = entries[0][1];
-  if (!Number.isSafeInteger(observedAt) || observedAt < 0) {
+  if (
+    !Number.isSafeInteger(/** @type {number} */ (observedAt)) ||
+    /** @type {number} */ (observedAt) < 0
+  ) {
     throw new TypeError(
       "observedAt must be a non-negative integer Unix millisecond timestamp",
     );
   }
-  return observedAt;
+  return /** @type {number} */ (observedAt);
 }
 
+/** @param {unknown} signal */
 function validateAbortSignal(signal) {
   if (
     signal !== undefined &&
     (!signal ||
-      typeof signal.aborted !== "boolean" ||
-      typeof signal.addEventListener !== "function")
+      typeof /** @type {{ aborted?: unknown }} */ (signal).aborted !==
+        "boolean" ||
+      typeof /** @type {{ addEventListener?: unknown }} */ (signal)
+        .addEventListener !== "function")
   ) {
     throw new TypeError("metadata hydration signal must be an AbortSignal");
   }
 }
 
+/**
+ * @param {unknown} value
+ * @param {readonly string[]} fields
+ * @param {string} label
+ * @returns {Record<string, unknown>}
+ */
 function ownStoredObject(value, fields, label) {
   if (!isPlainObject(value)) {
     throw new TypeError(`${label} must be a plain object`);
@@ -262,6 +385,7 @@ function ownStoredObject(value, fields, label) {
   ) {
     throw new TypeError(`${label} must contain exactly the supported fields`);
   }
+  /** @type {Record<string, unknown>} */
   const result = {};
   for (const field of fields) {
     const descriptor = Object.getOwnPropertyDescriptor(value, field);
@@ -273,13 +397,18 @@ function ownStoredObject(value, fields, label) {
   return result;
 }
 
+/** @param {unknown} value */
 function validateEffectiveTime(value) {
-  if (!Number.isSafeInteger(value) || value < 0) {
+  if (
+    !Number.isSafeInteger(/** @type {number} */ (value)) ||
+    /** @type {number} */ (value) < 0
+  ) {
     throw new TypeError("position effectiveTime must be a non-negative safe integer");
   }
-  return value;
+  return /** @type {number} */ (value);
 }
 
+/** @param {unknown} value */
 function validateViewerId(value) {
   return validPositionObservation({
     viewerId: value,
@@ -288,13 +417,20 @@ function validateViewerId(value) {
   }).viewerId;
 }
 
+/**
+ * @param {unknown} value
+ * @returns {ViewerHighWaterMark}
+ */
 function validatePositionViewer(value) {
   const viewer = ownStoredObject(
     value,
     POSITION_VIEWER_FIELDS,
     "position viewer order",
   );
-  if (!Number.isSafeInteger(viewer.sequence) || viewer.sequence < 0) {
+  if (
+    !Number.isSafeInteger(/** @type {number} */ (viewer.sequence)) ||
+    /** @type {number} */ (viewer.sequence) < 0
+  ) {
     throw new TypeError("position viewer sequence must be a non-negative safe integer");
   }
   const effectiveTime = validateEffectiveTime(viewer.effectiveTime);
@@ -303,10 +439,14 @@ function validatePositionViewer(value) {
   }
   return {
     effectiveTime,
-    sequence: viewer.sequence,
+    sequence: /** @type {number} */ (viewer.sequence),
   };
 }
 
+/**
+ * @param {unknown} value
+ * @returns {PositionWinner | null}
+ */
 function validatePositionWinner(value) {
   if (value === null) {
     return null;
@@ -324,12 +464,23 @@ function validatePositionWinner(value) {
     return { effectiveTime, viewerId: null, sequence: 0 };
   }
   const viewerId = validateViewerId(winner.viewerId);
-  if (!Number.isSafeInteger(winner.sequence) || winner.sequence < 1) {
+  if (
+    !Number.isSafeInteger(/** @type {number} */ (winner.sequence)) ||
+    /** @type {number} */ (winner.sequence) < 1
+  ) {
     throw new TypeError("observed position winners must use a positive sequence");
   }
-  return { effectiveTime, viewerId, sequence: winner.sequence };
+  return {
+    effectiveTime,
+    viewerId,
+    sequence: /** @type {number} */ (winner.sequence),
+  };
 }
 
+/**
+ * @param {unknown} value
+ * @returns {PositionOrderEntry}
+ */
 function validateCurrentPositionOrder(value) {
   const order = ownStoredObject(
     value,
@@ -348,6 +499,7 @@ function validateCurrentPositionOrder(value) {
   if (viewerKeys.length > MAX_VIEWERS_PER_GENERATION) {
     throw new TypeError("position order has too many viewers");
   }
+  /** @type {Record<string, ViewerHighWaterMark>} */
   const viewers = {};
   for (const key of viewerKeys) {
     if (typeof key !== "string") {
@@ -401,6 +553,7 @@ function validateCurrentPositionOrder(value) {
   };
 }
 
+/** @param {unknown} value */
 function isLegacyPositionOrder(value) {
   if (!isPlainObject(value)) {
     return false;
@@ -416,6 +569,10 @@ function isLegacyPositionOrder(value) {
   );
 }
 
+/**
+ * @param {unknown} storageResult
+ * @returns {PositionOrderMap}
+ */
 function readPositionOrder(storageResult) {
   if (!isPlainObject(storageResult)) {
     throw new BooksStorageDataError("stored position order response must be an object");
@@ -428,6 +585,7 @@ function readPositionOrder(storageResult) {
     throw new BooksStorageDataError("stored position order must be a plain object");
   }
 
+  /** @type {PositionOrderMap} */
   const positionOrder = {};
   for (const key of Reflect.ownKeys(storedPositionOrder)) {
     const descriptor = Object.getOwnPropertyDescriptor(storedPositionOrder, key);
@@ -446,6 +604,11 @@ function readPositionOrder(storageResult) {
   return positionOrder;
 }
 
+/**
+ * @param {PositionOrderMap} positionOrder
+ * @param {string} canonicalUrl
+ * @returns {RelevantPositionOrder | undefined}
+ */
 function readRelevantPositionOrder(positionOrder, canonicalUrl) {
   if (!Object.hasOwn(positionOrder, canonicalUrl)) {
     return undefined;
@@ -457,11 +620,15 @@ function readRelevantPositionOrder(positionOrder, canonicalUrl) {
       : { current: validateCurrentPositionOrder(value) };
   } catch (error) {
     throw new BooksStorageDataError(
-      `stored position order for ${canonicalUrl} is malformed: ${error.message}`,
+      `stored position order for ${canonicalUrl} is malformed: ${/** @type {Error} */ (error).message}`,
     );
   }
 }
 
+/**
+ * @param {unknown} generation
+ * @returns {PositionOrderEntry}
+ */
 function createPositionOrder(generation) {
   return {
     version: POSITION_ORDER_VERSION,
@@ -471,6 +638,11 @@ function createPositionOrder(generation) {
   };
 }
 
+/**
+ * @param {PositionObservation} observation
+ * @param {string} generation
+ * @returns {PositionOrderEntry}
+ */
 function migratePositionOrder(observation, generation) {
   const state = createPositionOrder(generation);
   state.viewers[observation.viewerId] = {
@@ -485,6 +657,10 @@ function migratePositionOrder(observation, generation) {
   return state;
 }
 
+/**
+ * @param {PositionWinner} left
+ * @param {PositionWinner} right
+ */
 function comparePositionWinners(left, right) {
   if (left.effectiveTime !== right.effectiveTime) {
     return left.effectiveTime < right.effectiveTime ? -1 : 1;
@@ -505,6 +681,10 @@ function comparePositionWinners(left, right) {
   return left.viewerId < right.viewerId ? -1 : 1;
 }
 
+/**
+ * @param {unknown} storageResult
+ * @returns {BooksMap}
+ */
 function readBooks(storageResult) {
   if (!isPlainObject(storageResult)) {
     throw new BooksStorageDataError("stored books response must be an object");
@@ -518,6 +698,7 @@ function readBooks(storageResult) {
     throw new BooksStorageDataError("stored books must be a plain object");
   }
 
+  /** @type {BooksMap} */
   const books = {};
   try {
     for (const key of Reflect.ownKeys(storedBooks)) {
@@ -532,17 +713,21 @@ function readBooks(storageResult) {
       });
     }
   } catch (error) {
-    throw new BooksStorageDataError(`stored books are malformed: ${error.message}`);
+    throw new BooksStorageDataError(
+      `stored books are malformed: ${/** @type {Error} */ (error).message}`,
+    );
   }
   return books;
 }
 
+/** @param {() => number} now */
 function currentTimestamp(now) {
   const timestamp = now();
   validateTimestamp(timestamp, "current time");
   return timestamp;
 }
 
+/** @param {() => number} nowMilliseconds */
 function currentMilliseconds(nowMilliseconds) {
   const timestamp = nowMilliseconds();
   if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
@@ -553,6 +738,7 @@ function currentMilliseconds(nowMilliseconds) {
   return timestamp;
 }
 
+/** @returns {string} */
 function randomTrackingGeneration() {
   const values = new Uint8Array(16);
   const crypto = globalThis.crypto;
@@ -563,6 +749,11 @@ function randomTrackingGeneration() {
   return [...values].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * @param {RelevantPositionOrder | undefined} relevantOrder
+ * @param {string} generation
+ * @returns {PositionOrderEntry}
+ */
 function positionOrderFrom(relevantOrder, generation) {
   if (relevantOrder?.current) {
     return relevantOrder.current;
@@ -572,6 +763,10 @@ function positionOrderFrom(relevantOrder, generation) {
     : createPositionOrder(generation);
 }
 
+/**
+ * @param {PositionOrderEntry} positionOrder
+ * @param {string} viewerId
+ */
 function registerPositionViewer(positionOrder, viewerId) {
   if (Object.hasOwn(positionOrder.viewers, viewerId)) {
     return true;
@@ -585,6 +780,11 @@ function registerPositionViewer(positionOrder, viewerId) {
   return true;
 }
 
+/**
+ * @param {number} timestamp
+ * @param {UpsertPatch} patch
+ * @returns {BookRecord}
+ */
 function createInitialRecord(timestamp, patch) {
   return {
     title: "",
@@ -598,6 +798,10 @@ function createInitialRecord(timestamp, patch) {
   };
 }
 
+/**
+ * @param {BooksStorageDependencies} [dependencies]
+ * @returns {BooksStorage}
+ */
 export function createBooksStorage({
   storageArea,
   lockManager,
@@ -628,17 +832,28 @@ export function createBooksStorage({
   }
 
   async function loadBooks() {
-    return readBooks(await storageArea.get(BOOKS_KEY));
+    return readBooks(
+      await /** @type {NonNullable<typeof storageArea>} */ (storageArea).get(
+        BOOKS_KEY,
+      ),
+    );
   }
 
   async function loadOrderedState() {
-    const stored = await storageArea.get([BOOKS_KEY, POSITION_ORDER_KEY]);
+    const stored = await /** @type {NonNullable<typeof storageArea>} */ (
+      storageArea
+    ).get([BOOKS_KEY, POSITION_ORDER_KEY]);
     return {
       books: readBooks(stored),
       positionOrder: readPositionOrder(stored),
     };
   }
 
+  /**
+   * @template T
+   * @param {() => Promise<T>} operation
+   * @returns {Promise<T>}
+   */
   async function mutate(operation) {
     if (!lockManager || typeof lockManager.request !== "function") {
       throw new Error("book mutations require the cross-context Web Locks API");
@@ -647,6 +862,7 @@ export function createBooksStorage({
     return lockManager.request(BOOKS_LOCK, { signal }, operation);
   }
 
+  /** @param {string | undefined} [previousGeneration] */
   function newTrackingGeneration(previousGeneration) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const generation = validPositionTrackingGeneration(
@@ -659,6 +875,16 @@ export function createBooksStorage({
     throw new Error("unable to create a distinct position tracking generation");
   }
 
+  /**
+   * @param {{
+   *   canonicalUrl: string,
+   *   patch: PositionPatch,
+   *   observation: PositionObservation,
+   *   requireRegisteredViewer: boolean,
+   *   trackingGeneration?: string,
+   * }} mutation
+   * @returns {Promise<StorageMutationStatus>}
+   */
   async function mutatePositionObservation({
     canonicalUrl,
     patch,
@@ -692,7 +918,10 @@ export function createBooksStorage({
         ) {
           return "stale";
         }
-        currentOrder = positionOrderFrom(relevantOrder, trackingGeneration);
+        currentOrder = positionOrderFrom(
+          relevantOrder,
+          /** @type {string} */ (trackingGeneration),
+        );
       }
 
       const viewerOrder = currentOrder.viewers[observation.viewerId];
@@ -736,7 +965,9 @@ export function createBooksStorage({
         currentOrder.winner &&
         comparePositionWinners(candidate, currentOrder.winner) <= 0
       ) {
-        await storageArea.set({ [POSITION_ORDER_KEY]: positionOrder });
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
+          [POSITION_ORDER_KEY]: positionOrder,
+        });
         return "stale";
       }
 
@@ -746,7 +977,7 @@ export function createBooksStorage({
         ...patch,
         lastReadAt: Math.max(existing.lastReadAt, observedTimestamp),
       };
-      await storageArea.set({
+      await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
         [BOOKS_KEY]: books,
         [POSITION_ORDER_KEY]: positionOrder,
       });
@@ -817,7 +1048,9 @@ export function createBooksStorage({
         }
         if (changed) {
           positionOrder[canonicalUrl] = currentOrder;
-          await storageArea.set({ [POSITION_ORDER_KEY]: positionOrder });
+          await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
+            [POSITION_ORDER_KEY]: positionOrder,
+          });
         }
         return {
           book: clone(existing),
@@ -845,7 +1078,7 @@ export function createBooksStorage({
           newTrackingGeneration(relevantOrder?.current?.generation),
         );
         books[canonicalUrl] = created;
-        await storageArea.set({
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
           [BOOKS_KEY]: books,
           [POSITION_ORDER_KEY]: positionOrder,
         });
@@ -872,12 +1105,14 @@ export function createBooksStorage({
         }
         books[canonicalUrl] = updated;
         if (existing) {
-          await storageArea.set({ [BOOKS_KEY]: books });
+          await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
+            [BOOKS_KEY]: books,
+          });
         } else {
           positionOrder[canonicalUrl] = createPositionOrder(
             newTrackingGeneration(relevantOrder?.current?.generation),
           );
-          await storageArea.set({
+          await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
             [BOOKS_KEY]: books,
             [POSITION_ORDER_KEY]: positionOrder,
           });
@@ -904,7 +1139,9 @@ export function createBooksStorage({
           return undefined;
         }
         books[canonicalUrl] = updated;
-        await storageArea.set({ [BOOKS_KEY]: books });
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
+          [BOOKS_KEY]: books,
+        });
         return clone(updated);
       });
     },
@@ -920,7 +1157,9 @@ export function createBooksStorage({
         }
         const updated = { ...existing, customTitle };
         books[canonicalUrl] = updated;
-        await storageArea.set({ [BOOKS_KEY]: books });
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
+          [BOOKS_KEY]: books,
+        });
         return clone(updated);
       });
     },
@@ -936,7 +1175,7 @@ export function createBooksStorage({
         const hadPositionOrder = Object.hasOwn(positionOrder, canonicalUrl);
         delete books[canonicalUrl];
         delete positionOrder[canonicalUrl];
-        await storageArea.set({
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
           [BOOKS_KEY]: books,
           ...(hadPositionOrder ? { [POSITION_ORDER_KEY]: positionOrder } : {}),
         });
@@ -1019,7 +1258,7 @@ export function createBooksStorage({
         };
         positionOrder[canonicalUrl] = currentOrder;
         books[canonicalUrl] = updated;
-        await storageArea.set({
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
           [BOOKS_KEY]: books,
           [POSITION_ORDER_KEY]: positionOrder,
         });
@@ -1029,6 +1268,7 @@ export function createBooksStorage({
   });
 }
 
+/** @returns {BooksStorage} */
 function defaultStorage() {
   return createBooksStorage({
     storageArea: globalThis.chrome?.storage?.local,
@@ -1036,42 +1276,76 @@ function defaultStorage() {
   });
 }
 
+/** @param {string} fileUrl */
 export async function getBook(fileUrl) {
   return defaultStorage().getBook(fileUrl);
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {string} viewerId
+ */
 export async function getPositionTrackingState(fileUrl, viewerId) {
   return defaultStorage().getPositionTrackingState(fileUrl, viewerId);
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {TrackPatch} patch
+ */
 export async function trackBook(fileUrl, patch) {
   return defaultStorage().trackBook(fileUrl, patch);
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {UpsertPatch} patch
+ */
 export async function upsertBook(fileUrl, patch) {
   return defaultStorage().upsertBook(fileUrl, patch);
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {HydrationPatch} patch
+ * @param {{ signal?: AbortSignal }} [options]
+ */
 export async function hydrateMetadata(fileUrl, patch, options) {
   return defaultStorage().hydrateMetadata(fileUrl, patch, options);
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {string | null} customTitle
+ */
 export async function updateCustomTitle(fileUrl, customTitle) {
   return defaultStorage().updateCustomTitle(fileUrl, customTitle);
 }
 
+/** @param {string} fileUrl */
 export async function removeBook(fileUrl) {
   return defaultStorage().removeBook(fileUrl);
 }
 
+/** @returns {Promise<Array<{ fileUrl: string, book: BookRecord }>>} */
 export async function listBooks() {
   return defaultStorage().listBooks();
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {PositionPatch} patch
+ * @param {PositionOptions} [options]
+ */
 export async function updatePosition(fileUrl, patch, options) {
   return defaultStorage().updatePosition(fileUrl, patch, options);
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {PositionPatch} patch
+ * @param {PositionObservation} observation
+ */
 export async function updatePendingPositionObservation(
   fileUrl,
   patch,
@@ -1084,6 +1358,12 @@ export async function updatePendingPositionObservation(
   );
 }
 
+/**
+ * @param {string} fileUrl
+ * @param {PositionPatch} patch
+ * @param {PositionObservation} observation
+ * @param {string} trackingGeneration
+ */
 export async function updatePositionObservation(
   fileUrl,
   patch,
