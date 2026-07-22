@@ -7,7 +7,8 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - PDF.js is vendored without a build step. Treat [`viewer/pdfjs/PROVENANCE.json`](viewer/pdfjs/PROVENANCE.json) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) as authoritative for its pinned release, integrity inventory, and licenses; do not format or hand-edit upstream files under `viewer/pdfjs/`.
 - Use [`docs/brave-validation.md`](docs/brave-validation.md) for reproducible authentic Brave loading and browser evidence. It requires a fresh profile, authenticated PID and flags, `extensions-internals` verification, local-file access proof, and artifact cleanup.
 - Use [`storage/books.mjs`](storage/books.mjs) for all app access to the `books` storage item; [`docs/storage.md`](docs/storage.md) defines its schema, validation, and cross-context serialization contract.
-- The project uses plain JavaScript with no build step or installed dependencies. Use Node.js 20 or newer and run `npm run check` for formatting, static syntax checks, and contract tests. For a focused contract run, use `node --test test/extension-contract.test.mjs`.
+- The project uses plain JavaScript with no build step or installed dependencies. Use Node.js 20 or newer and run `npm run check` for formatting, static syntax checks, and the full test suite. For a focused contract run, use `node --test test/extension-contract.test.mjs`.
+- [`IMPROVEMENTS.md`](IMPROVEMENTS.md) records the accepted improvement backlog (tracked as issues #23–#30) and the rejected findings with reasons; consult it before proposing performance or architecture changes.
 
 ## Maintaining this file
 
