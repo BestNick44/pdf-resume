@@ -1,3 +1,5 @@
+// @ts-check
+
 import { canonicalizeLocalPdfUrl } from "./shared/local-pdf-url.mjs";
 import { createPositionUpdateMessageHandler } from "./shared/position-update-messaging.mjs";
 import {
@@ -6,11 +8,24 @@ import {
   updatePositionObservation,
 } from "./storage/books.mjs";
 
+/**
+ * @typedef {{
+ *   pendingFileUrl: string | undefined,
+ *   intentGeneration: number,
+ *   drain: Promise<void> | undefined,
+ * }} RedirectState
+ */
+
 const runtime = globalThis.chrome?.runtime;
 const tabs = globalThis.chrome?.tabs;
 const onBeforeNavigate = globalThis.chrome?.webNavigation?.onBeforeNavigate;
+/** @type {Map<number, RedirectState>} */
 const redirectDrainsByTab = new Map();
 
+/**
+ * @param {chrome.tabs.Tab} tab
+ * @param {string} fileUrl
+ */
 function tabMatchesNavigation(tab, fileUrl) {
   const candidateUrl = tab.pendingUrl ?? tab.url;
   try {
@@ -20,6 +35,12 @@ function tabMatchesNavigation(tab, fileUrl) {
   }
 }
 
+/**
+ * @param {number} tabId
+ * @param {string} fileUrl
+ * @param {RedirectState} state
+ * @param {number} intentGeneration
+ */
 async function redirectTabToTrackedLocalPdf(
   tabId,
   fileUrl,
@@ -50,6 +71,10 @@ async function redirectTabToTrackedLocalPdf(
   }
 }
 
+/**
+ * @param {number} tabId
+ * @param {RedirectState} state
+ */
 async function drainRedirects(tabId, state) {
   try {
     while (state.pendingFileUrl !== undefined) {
@@ -70,6 +95,11 @@ async function drainRedirects(tabId, state) {
   }
 }
 
+/**
+ * @param {number} tabId
+ * @param {string} fileUrl
+ * @returns {Promise<void>}
+ */
 function queueRedirect(tabId, fileUrl) {
   // Equal-timestamp callbacks can represent distinct navigations, so preserve
   // one follow-up even when its canonical URL matches the active attempt.
@@ -77,9 +107,10 @@ function queueRedirect(tabId, fileUrl) {
   if (activeState) {
     activeState.intentGeneration += 1;
     activeState.pendingFileUrl = fileUrl;
-    return activeState.drain;
+    return /** @type {Promise<void>} */ (activeState.drain);
   }
 
+  /** @type {RedirectState} */
   const state = {
     pendingFileUrl: fileUrl,
     intentGeneration: 1,
@@ -90,6 +121,7 @@ function queueRedirect(tabId, fileUrl) {
   return state.drain;
 }
 
+/** @param {chrome.webNavigation.WebNavigationBaseCallbackDetails} details */
 function redirectTrackedLocalPdf(details) {
   if (details.frameId !== 0 || !Number.isInteger(details.tabId)) {
     return;
@@ -115,7 +147,12 @@ if (runtime?.onMessage?.addListener && runtime.id) {
   );
 }
 
-if (runtime?.id && tabs?.get && tabs?.update && onBeforeNavigate?.addListener) {
+if (
+  runtime?.id &&
+  /** @type {unknown} */ (tabs?.get) &&
+  /** @type {unknown} */ (tabs?.update) &&
+  onBeforeNavigate?.addListener
+) {
   onBeforeNavigate.addListener(redirectTrackedLocalPdf, {
     url: [{ schemes: ["file"] }],
   });

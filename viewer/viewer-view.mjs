@@ -1,3 +1,15 @@
+// @ts-check
+
+/**
+ * @param {{
+ *   frame: HTMLIFrameElement,
+ *   errorPanel: HTMLElement,
+ *   errorMessage: HTMLElement,
+ *   fileAccessInstructions: HTMLElement,
+ *   warningPanel: HTMLElement,
+ *   warningMessage: HTMLElement,
+ * }} elements
+ */
 export function createViewerView({
   frame,
   errorPanel,
@@ -22,6 +34,7 @@ export function createViewerView({
   }
 
   return {
+    /** @param {string} message */
     showError(message) {
       hideFileAccessInstructions();
       hideWarning();
@@ -36,6 +49,7 @@ export function createViewerView({
       errorPanel.hidden = true;
       fileAccessInstructions.hidden = false;
     },
+    /** @param {URL} viewerUrl */
     showViewer(viewerUrl) {
       errorMessage.textContent = "";
       errorPanel.hidden = true;
@@ -45,6 +59,7 @@ export function createViewerView({
       frame.src = viewerUrl.href;
       frame.hidden = false;
     },
+    /** @param {string} message */
     showWarning(message) {
       warningMessage.textContent = message;
       warningPanel.hidden = false;

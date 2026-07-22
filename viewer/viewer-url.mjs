@@ -1,6 +1,9 @@
+// @ts-check
+
 import { canonicalizeLocalPdfUrl } from "../shared/local-pdf-url.mjs";
 
-const INPUT_ERROR = "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.";
+const INPUT_ERROR =
+  "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.";
 
 export class ViewerInputError extends Error {
   constructor() {
@@ -9,6 +12,10 @@ export class ViewerInputError extends Error {
   }
 }
 
+/**
+ * @param {unknown} search
+ * @returns {URL}
+ */
 export function parseViewerFileQuery(search) {
   if (typeof search !== "string" || !search.startsWith("?file=")) {
     throw new ViewerInputError();
@@ -37,9 +44,16 @@ export function parseViewerFileQuery(search) {
   }
 }
 
+/**
+ * @param {string} objectUrl
+ * @param {URL} fileUrl
+ * @param {URL} viewerUrl
+ * @returns {URL}
+ */
 export function buildPdfJsViewerUrl(objectUrl, fileUrl, viewerUrl) {
   const filename = fileUrl.pathname.split("/").at(-1);
   const pdfJsUrl = new URL(viewerUrl);
-  pdfJsUrl.search = new URLSearchParams({ file: `${objectUrl}#${filename}` });
+  /** @type {{ search: string | URLSearchParams }} */ (pdfJsUrl).search =
+    new URLSearchParams({ file: `${objectUrl}#${filename}` });
   return pdfJsUrl;
 }
