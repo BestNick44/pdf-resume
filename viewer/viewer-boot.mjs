@@ -1,13 +1,9 @@
 // @ts-check
 
-import {
-  buildPdfJsViewerUrl,
-  parseViewerFileQuery,
-  ViewerInputError,
-} from "./viewer-url.mjs";
+import { parseViewerFileQuery, ViewerInputError } from "./viewer-url.mjs";
 
 /** @typedef {ReturnType<typeof import("./viewer-view.mjs").createViewerView>} ViewerView */
-/** @typedef {{ fileUrl: string, objectUrl: string }} BootedViewer */
+/** @typedef {{ fileUrl: string, objectUrl?: string }} BootedViewer */
 
 const READ_ERROR =
   "The local PDF could not be read. Verify that the file still exists and can be opened.";
@@ -38,25 +34,9 @@ export async function bootViewer({
       return undefined;
     }
 
-    const response = await fetchPdf(fileUrl.href, {
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-    });
-    if (!response.ok) {
-      throw new Error(`Local file request failed (${response.status}).`);
-    }
-
-    const pdfBlob = await response.blob();
-    const signatureBytes = await pdfBlob.slice(0, 1024).arrayBuffer();
-    const signature = new TextDecoder("ascii").decode(signatureBytes);
-    if (!signature.includes("%PDF-")) {
-      throw new ViewerInputError();
-    }
-
-    const objectUrl = createObjectUrl(pdfBlob);
-    view.showViewer(buildPdfJsViewerUrl(objectUrl, fileUrl, pdfJsViewerUrl));
-    return { fileUrl: fileUrl.href, objectUrl };
+    view.showViewer(pdfJsViewerUrl);
+    await view.openDocument(fileUrl.href, fileUrl.href);
+    return { fileUrl: fileUrl.href };
   } catch (error) {
     view.showError(
       error instanceof ViewerInputError ? error.message : READ_ERROR,

@@ -10,6 +10,7 @@ import { createPdfJsMetadataHydration } from "./pdfjs-metadata-hydration.mjs";
 import { createPdfJsPositionTracking } from "./pdfjs-position-tracking.mjs";
 import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
+import { installViewerStartupPrototypeMeasurements } from "./viewer-startup-prototype.mjs";
 
 /** @typedef {import("../types/pdfjs.d.ts").PdfJsFrame} PdfJsFrame */
 /** @typedef {import("../types/storage.d.ts").RecordObservationMessage} RecordObservationMessage */
@@ -34,6 +35,7 @@ import { createViewerView } from "./viewer-view.mjs";
  *   showError: (message: string) => void,
  *   showFileAccessInstructions: () => void,
  *   showViewer: (viewerUrl: URL) => void,
+ *   openDocument: (url: string, originalUrl: string) => Promise<void>,
  *   showWarning: (message: string, error?: unknown) => void,
  * }} ViewerView
  */
@@ -127,6 +129,16 @@ export async function startViewerApp({
       hostDocument.querySelector("#viewerWarningMessage")
     ),
   });
+  if (createView === createViewerView) {
+    const showViewer = view.showViewer;
+    view.showViewer = (viewerUrl) => {
+      installViewerStartupPrototypeMeasurements(frame, {
+        performance: hostWindow.performance,
+        target: hostWindow,
+      });
+      showViewer(viewerUrl);
+    };
+  }
   const viewer = await bootViewerOperation({
     search: hostWindow.location.search,
     fetchPdf,
@@ -164,7 +176,9 @@ export async function startViewerApp({
         try {
           positionTracking?.destroy();
         } finally {
-          revokeObjectUrl(activeViewer.objectUrl);
+          if (activeViewer.objectUrl) {
+            revokeObjectUrl(activeViewer.objectUrl);
+          }
         }
       }
     }

@@ -42,6 +42,11 @@ export interface PdfJsDocument {
   getMetadata(): Promise<unknown>;
 }
 
+export interface PdfJsOpenOptions {
+  originalUrl: string;
+  url: string;
+}
+
 export interface PdfJsApplicationBoundary {
   appConfig?: {
     mainContainer?: HTMLElement;
@@ -49,6 +54,7 @@ export interface PdfJsApplicationBoundary {
   eventBus?: PdfJsEventBus;
   initializedPromise?: PromiseLike<unknown>;
   isInitialViewSet?: boolean;
+  open?(options: PdfJsOpenOptions): PromiseLike<void>;
   pdfDocument?: PdfJsDocument | null;
   pdfViewer?: PdfJsPdfViewer;
 }

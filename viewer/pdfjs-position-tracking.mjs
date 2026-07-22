@@ -752,6 +752,9 @@ export function createPdfJsPositionTracking({
   }
 
   frame.addEventListener("load", onFrameLoad);
+  if (frame.contentDocument?.readyState === "complete") {
+    onFrameLoad();
+  }
 
   return Object.freeze({
     handoff() {
