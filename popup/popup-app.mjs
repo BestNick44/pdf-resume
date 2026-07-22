@@ -591,18 +591,21 @@ export function createPopupApp({
         return;
       }
 
-      const existing = await getBook(candidate.fileUrl);
+      const [existing, fileAccessAllowed] = await Promise.all([
+        getBook(candidate.fileUrl),
+        isFileSchemeAccessAllowed(),
+      ]);
       if (existing) {
         candidate.persisted = true;
         canActivate = false;
         trackedBook = existing;
-        needsFileAccessInstructions = !(await isFileSchemeAccessAllowed());
+        needsFileAccessInstructions = !fileAccessAllowed;
         render("showTracked", currentTrackedBookDetails());
         return;
       }
 
       candidate.persisted = false;
-      if (!(await isFileSchemeAccessAllowed())) {
+      if (!fileAccessAllowed) {
         render("showFileAccessInstructions", { filename: candidate.filename });
         return;
       }
