@@ -1,13 +1,36 @@
+// @ts-check
+
 import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 const ignoredDirectoryNames = new Set([".git", "node_modules"]);
 const appVendorDirectory = path.join("viewer", "pdfjs");
 
+/**
+ * @typedef {object} FileDiscoveryOptions
+ * @property {Set<string>} [extensions]
+ * @property {Set<string>} [excludedDirectories]
+ * @property {string} [root]
+ */
+
+/**
+ * @typedef {object} RepositoryDiscoveryOptions
+ * @property {Set<string>} [extensions]
+ * @property {boolean} [excludeAppVendor]
+ */
+
+/** @typedef {{ type: "identifier" | "punctuation" | "string", value: string }} JavaScriptToken */
+
+/** @param {string} filePath */
 function portablePath(filePath) {
   return filePath.split(path.sep).join("/");
 }
 
+/**
+ * @param {string} directory
+ * @param {FileDiscoveryOptions} [options]
+ * @returns {Promise<string[]>}
+ */
 async function walkRegularFiles(
   directory,
   { extensions, excludedDirectories = new Set(), root = directory } = {},
@@ -46,6 +69,10 @@ async function walkRegularFiles(
   return files;
 }
 
+/**
+ * @param {string} projectRoot
+ * @param {RepositoryDiscoveryOptions} [options]
+ */
 export async function discoverRepositoryFiles(
   projectRoot,
   { extensions, excludeAppVendor = false } = {},
@@ -60,6 +87,7 @@ export async function discoverRepositoryFiles(
   });
 }
 
+/** @param {string} projectRoot */
 export async function discoverAppJavaScriptFiles(projectRoot) {
   return discoverRepositoryFiles(projectRoot, {
     extensions: new Set([".js", ".mjs"]),
@@ -67,6 +95,7 @@ export async function discoverAppJavaScriptFiles(projectRoot) {
   });
 }
 
+/** @param {string} projectRoot */
 export async function discoverAppHtmlFiles(projectRoot) {
   return discoverRepositoryFiles(projectRoot, {
     extensions: new Set([".html"]),
@@ -74,6 +103,7 @@ export async function discoverAppHtmlFiles(projectRoot) {
   });
 }
 
+/** @param {string} testRoot */
 export async function discoverTestSuites(testRoot) {
   const files = await walkRegularFiles(testRoot, {
     extensions: new Set([".mjs"]),
@@ -87,6 +117,10 @@ export async function discoverTestSuites(testRoot) {
   return suites;
 }
 
+/**
+ * @param {string} filePath
+ * @param {string} [label]
+ */
 export async function assertRegularFile(filePath, label = filePath) {
   let fileStat;
   try {
@@ -100,6 +134,10 @@ export async function assertRegularFile(filePath, label = filePath) {
   }
 }
 
+/**
+ * @param {string} source
+ * @param {number} startIndex
+ */
 function readQuotedJavaScriptString(source, startIndex) {
   const quote = source[startIndex];
   let value = "";
@@ -122,6 +160,7 @@ function readQuotedJavaScriptString(source, startIndex) {
       continue;
     }
 
+    /** @type {Record<string, string>} */
     const escapes = {
       "0": "\0",
       b: "\b",
@@ -138,7 +177,9 @@ function readQuotedJavaScriptString(source, startIndex) {
   throw new Error("Unterminated JavaScript string while discovering module imports");
 }
 
+/** @param {string} source */
 function javaScriptTokens(source) {
+  /** @type {JavaScriptToken[]} */
   const tokens = [];
   let index = 0;
 
@@ -195,6 +236,7 @@ function javaScriptTokens(source) {
   return tokens;
 }
 
+/** @param {string} source */
 export function discoverStaticModuleSpecifiers(source) {
   const tokens = javaScriptTokens(source);
   const specifiers = [];
@@ -269,6 +311,7 @@ export function discoverStaticModuleSpecifiers(source) {
   return specifiers;
 }
 
+/** @param {string} source */
 export function discoverImportMetaUrlReferences(source) {
   const tokens = javaScriptTokens(source);
   const references = [];
@@ -369,6 +412,10 @@ const htmlNumericCharacterReferenceReplacements = new Map([
   [0x9f, 0x0178],
 ]);
 
+/**
+ * @param {string} digits
+ * @param {number} radix
+ */
 function decodeHtmlNumericCharacterReference(digits, radix) {
   let codePoint = Number.parseInt(digits, radix);
   if (
@@ -383,6 +430,7 @@ function decodeHtmlNumericCharacterReference(digits, radix) {
   return String.fromCodePoint(codePoint);
 }
 
+/** @param {string} value */
 function decodeHtmlCharacterReferences(value) {
   let decodedValue = "";
   let index = 0;
@@ -480,6 +528,10 @@ function decodeHtmlCharacterReferences(value) {
   return decodedValue;
 }
 
+/**
+ * @param {string} source
+ * @param {number} startIndex
+ */
 function findHtmlCommentEnd(source, startIndex) {
   let index = startIndex + 4;
   let state = "start";
@@ -523,6 +575,10 @@ function findHtmlCommentEnd(source, startIndex) {
   return source.length;
 }
 
+/**
+ * @param {string} source
+ * @param {number} startIndex
+ */
 function findHtmlTagEnd(source, startIndex) {
   let index = startIndex;
   let state = "before-attribute-name";
@@ -640,6 +696,11 @@ const htmlTextElementStates = new Map([
   ["xmp", "raw-text"],
 ]);
 
+/**
+ * @param {string} source
+ * @param {number} startIndex
+ * @param {string} tagName
+ */
 function findHtmlTextElementEnd(source, startIndex, tagName) {
   let index = startIndex;
 
@@ -667,6 +728,12 @@ function findHtmlTextElementEnd(source, startIndex, tagName) {
   return source.length;
 }
 
+/**
+ * @param {string} source
+ * @param {number} startIndex
+ * @param {number} endIndex
+ * @param {string} attributeName
+ */
 function htmlAttributeValue(source, startIndex, endIndex, attributeName) {
   let index = startIndex;
 
@@ -729,6 +796,7 @@ function htmlAttributeValue(source, startIndex, endIndex, attributeName) {
   return undefined;
 }
 
+/** @param {string} value */
 function discoverSrcsetReferences(value) {
   const references = [];
   let index = 0;
@@ -773,6 +841,7 @@ function discoverSrcsetReferences(value) {
   return references;
 }
 
+/** @param {string} source */
 export function discoverHtmlResourceReferences(source) {
   const references = [];
   const resourceAttributes = new Map([
@@ -852,6 +921,7 @@ export function discoverHtmlResourceReferences(source) {
   return references;
 }
 
+/** @param {string} source */
 export function discoverCssResourceReferences(source) {
   const references = [];
   const resourcePattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^\s"')]+))\s*\)/gi;
@@ -867,6 +937,12 @@ export function discoverCssResourceReferences(source) {
   return references;
 }
 
+/**
+ * @param {string} projectRoot
+ * @param {string} containingFile
+ * @param {string} reference
+ * @param {{ moduleSpecifier?: boolean }} [options]
+ */
 function resolveLocalReference(
   projectRoot,
   containingFile,
@@ -914,14 +990,18 @@ function resolveLocalReference(
   return resolvedPath;
 }
 
+/**
+ * @param {{ projectRoot: string, entryFiles: string[] }} options
+ */
 export async function validateStaticResourceGraph({ projectRoot, entryFiles }) {
   const pending = entryFiles.map((entryFile) =>
     path.isAbsolute(entryFile) ? entryFile : path.resolve(projectRoot, entryFile),
   );
+  /** @type {Set<string>} */
   const visited = new Set();
 
   while (pending.length > 0) {
-    const filePath = pending.shift();
+    const filePath = /** @type {string} */ (pending.shift());
     const relativePath = portablePath(path.relative(projectRoot, filePath));
     if (visited.has(relativePath)) {
       continue;
@@ -943,7 +1023,9 @@ export async function validateStaticResourceGraph({ projectRoot, entryFiles }) {
     }
 
     const source = await readFile(filePath, "utf8");
+    /** @type {string[]} */
     let resourceReferences = [];
+    /** @type {string[]} */
     let moduleSpecifiers = [];
     if (extension === ".html") {
       resourceReferences = discoverHtmlResourceReferences(source);
@@ -955,9 +1037,11 @@ export async function validateStaticResourceGraph({ projectRoot, entryFiles }) {
     }
 
     for (const reference of moduleSpecifiers) {
-      const modulePath = resolveLocalReference(projectRoot, filePath, reference, {
-        moduleSpecifier: true,
-      });
+      const modulePath = /** @type {string} */ (
+        resolveLocalReference(projectRoot, filePath, reference, {
+          moduleSpecifier: true,
+        })
+      );
       pending.push(modulePath);
     }
     for (const reference of resourceReferences) {
