@@ -48,32 +48,35 @@ function candidateFromTabs(tabs, getRuntimeUrl) {
   };
 }
 
-function progressPercent(book) {
-  return book.totalPages > 0
-    ? Math.min(Math.round((book.currentPage / book.totalPages) * 100), 100)
-    : null;
+function displayTotalPages(book) {
+  return book.totalPages >= book.currentPage ? book.totalPages : 0;
+}
+
+function progressPercent(currentPage, totalPages) {
+  return totalPages > 0 ? Math.round((currentPage / totalPages) * 100) : null;
 }
 
 function trackedBookDetails(book, status = {}) {
-  const hasKnownTotal = book.totalPages > 0;
+  const totalPages = displayTotalPages(book);
   return {
     title: book.customTitle ?? book.title,
     customTitle: book.customTitle,
     currentPage: book.currentPage,
-    totalPages: book.totalPages,
-    pagesRemaining: hasKnownTotal ? Math.max(book.totalPages - book.currentPage, 0) : null,
-    progressPercent: progressPercent(book),
+    totalPages,
+    pagesRemaining: totalPages > 0 ? totalPages - book.currentPage : null,
+    progressPercent: progressPercent(book.currentPage, totalPages),
     ...status,
   };
 }
 
 function libraryBookDetails({ fileUrl, book }) {
+  const totalPages = displayTotalPages(book);
   return {
     fileUrl,
     title: book.customTitle ?? book.title,
     currentPage: book.currentPage,
-    totalPages: book.totalPages,
-    progressPercent: progressPercent(book),
+    totalPages,
+    progressPercent: progressPercent(book.currentPage, totalPages),
   };
 }
 
@@ -94,6 +97,20 @@ function tabMatchesCandidate(tab, candidate, getRuntimeUrl) {
   return (
     currentCandidate?.fileUrl === candidate.fileUrl && pendingUrlMatches(tab, candidate.fileUrl)
   );
+}
+
+function captureTabNavigation(tab) {
+  return {
+    tabId: tab.id,
+    url: tab.url,
+    pendingUrl: tab.pendingUrl,
+  };
+}
+
+function tabMatchesCapturedNavigation(tab, capturedTab) {
+  return tab?.id === capturedTab.tabId &&
+    tab.url === capturedTab.url &&
+    tab.pendingUrl === capturedTab.pendingUrl;
 }
 
 export function createPopupApp({
@@ -129,7 +146,7 @@ export function createPopupApp({
   let canActivate = false;
   let destroyed = false;
   let libraryBooks;
-  let libraryTabId;
+  let libraryTab;
   let needsFileAccessInstructions = false;
   let pending;
   let started = false;
@@ -158,22 +175,45 @@ export function createPopupApp({
 
   async function runActivation() {
     canActivate = false;
-    let stage = "revalidate";
+    let stage = "permission";
     render("showPending", {
       filename: candidate.filename,
       message: candidate.persisted ? "Opening tracked book…" : "Tracking this book…",
     });
 
     try {
+      if (!(await isFileSchemeAccessAllowed())) {
+        render("showFileAccessInstructions", { filename: candidate.filename });
+        return;
+      }
+
+      stage = "revalidate";
       const currentTab = await getTab(candidate.tabId);
       if (!tabMatchesCandidate(currentTab, candidate, getRuntimeUrl)) {
         throw new Error("The original tab no longer shows this local PDF.");
       }
 
       if (!candidate.persisted) {
+        stage = "permission";
+        if (!(await isFileSchemeAccessAllowed())) {
+          render("showFileAccessInstructions", { filename: candidate.filename });
+          return;
+        }
+
+        stage = "revalidate";
+        const persistenceCandidate = await getTab(candidate.tabId);
+        if (!tabMatchesCandidate(persistenceCandidate, candidate, getRuntimeUrl)) {
+          throw new Error("The original tab no longer shows this local PDF.");
+        }
         stage = "storage";
         await trackBook(candidate.fileUrl, { title: candidate.filename });
         candidate.persisted = true;
+      }
+
+      stage = "permission";
+      if (!(await isFileSchemeAccessAllowed())) {
+        render("showFileAccessInstructions", { filename: candidate.filename });
+        return;
       }
 
       stage = "redirect";
@@ -218,10 +258,14 @@ export function createPopupApp({
     return pending;
   }
 
-  async function runRename(customTitle) {
+  async function runRename(customTitle, customTitleDraft) {
     render(
       "showTracked",
-      currentTrackedBookDetails({ busy: true, status: "Saving title…" }),
+      currentTrackedBookDetails({
+        busy: true,
+        customTitleDraft,
+        status: "Saving title…",
+      }),
     );
     try {
       const updated = await updateCustomTitle(candidate.fileUrl, customTitle);
@@ -241,6 +285,7 @@ export function createPopupApp({
       render(
         "showTracked",
         currentTrackedBookDetails({
+          customTitleDraft,
           error: "The title could not be saved. Try again.",
           status: "Unable to save title",
         }),
@@ -256,7 +301,7 @@ export function createPopupApp({
     if (normalizedTitle === trackedBook.customTitle) {
       return undefined;
     }
-    pending = runRename(normalizedTitle).finally(() => {
+    pending = runRename(normalizedTitle, customTitle).finally(() => {
       pending = undefined;
     });
     return pending;
@@ -300,8 +345,26 @@ export function createPopupApp({
       status: `Opening ${book.title}…`,
     });
     try {
+      if (!(await isFileSchemeAccessAllowed())) {
+        render("showFileAccessInstructions", { filename: book.title });
+        return;
+      }
+
+      const currentTab = await getTab(libraryTab.tabId);
+      if (!tabMatchesCapturedNavigation(currentTab, libraryTab)) {
+        throw new Error("the original tab has navigated elsewhere");
+      }
+      if (!(await isFileSchemeAccessAllowed())) {
+        render("showFileAccessInstructions", { filename: book.title });
+        return;
+      }
+
       const viewerPath = `viewer.html?file=${encodeURIComponent(book.fileUrl)}`;
-      const openedTab = await updateTab(libraryTabId, { url: getRuntimeUrl(viewerPath) });
+      const finalTab = await getTab(libraryTab.tabId);
+      if (!tabMatchesCapturedNavigation(finalTab, libraryTab)) {
+        throw new Error("the original tab has navigated elsewhere");
+      }
+      const openedTab = await updateTab(libraryTab.tabId, { url: getRuntimeUrl(viewerPath) });
       if (openedTab === undefined) {
         throw new Error("the tracked book could not be opened in the viewer");
       }
@@ -345,8 +408,8 @@ export function createPopupApp({
           render("showIneligible");
           return;
         }
+        libraryTab = captureTabNavigation(activeTab);
         libraryBooks = (await listBooks()).map(libraryBookDetails);
-        libraryTabId = activeTab.id;
         render("showLibrary", { books: libraryBooks });
         return;
       }

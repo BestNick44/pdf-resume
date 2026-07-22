@@ -6,6 +6,7 @@ import {
   createBooksStorage,
 } from "../storage/books.mjs";
 import {
+  createPositionObservationSource,
   createPositionUpdateClient,
   createPositionUpdateMessageHandler,
 } from "../shared/position-update-messaging.mjs";
@@ -17,6 +18,8 @@ import { createFakeScheduler } from "./support/fake-scheduler.mjs";
 
 const BOOK_URL = "file:///Users/reader/Books/A%20Book.pdf";
 const BLOB_URL = "blob:chrome-extension://abcdefghijkl/document-id";
+const OBSERVATION_START = 1_750_000_000_000;
+const TEST_TRACKING_GENERATION = "0".repeat(32);
 
 function canonicalRecord(overrides = {}) {
   return {
@@ -32,7 +35,7 @@ function canonicalRecord(overrides = {}) {
 }
 
 async function drainMicrotasks() {
-  for (let turn = 0; turn < 5; turn += 1) {
+  for (let turn = 0; turn < 10; turn += 1) {
     await Promise.resolve();
   }
 }
@@ -49,22 +52,34 @@ function deferred() {
 
 function createController({
   initialPosition = { currentPage: 1, scrollTop: 0 },
+  observationSource,
   retryDelaysMilliseconds,
+  startTime = OBSERVATION_START,
+  trackingGeneration = TEST_TRACKING_GENERATION,
   update,
 } = {}) {
-  const time = createFakeScheduler();
+  const time = createFakeScheduler(startTime);
   const calls = [];
+  const updateOperation =
+    update ??
+    (async (fileUrl, position) => {
+      calls.push({ fileUrl, position });
+      return { ...canonicalRecord(), ...position };
+    });
   const controller = createPositionSaveController({
     fileUrl: BOOK_URL,
     initialPosition,
-    updatePosition:
-      update ??
-      (async (fileUrl, position) => {
-        calls.push({ fileUrl, position });
-        return { ...canonicalRecord(), ...position };
-      }),
+    updatePosition(fileUrl, position, observation) {
+      return updateOperation(
+        fileUrl,
+        position,
+        observation,
+        trackingGeneration,
+      );
+    },
     scheduler: time.scheduler,
     clock: time.clock,
+    observationSource,
     retryDelaysMilliseconds,
   });
   return { calls, controller, time };
@@ -72,11 +87,14 @@ function createController({
 
 function createMessageBridge(handler, extensionId = "abcdefghijkl") {
   const keptAlive = [];
+  const messages = [];
   const responses = [];
   return {
     keptAlive,
+    messages,
     responses,
     sendMessage(message) {
+      messages.push(structuredClone(message));
       const response = new Promise((resolve) => {
         keptAlive.push(handler(message, { id: extensionId }, resolve));
       });
@@ -135,16 +153,19 @@ class FakeEventBus {
 }
 
 function createPdfJsHarness({
+  clock,
   createRestoreLifecycle,
   createSaveController,
   getBook = async () => canonicalRecord(),
+  getPositionTrackingState,
+  handoffPendingPosition = () => {},
   handoffPosition = () => {},
   initialReadRetryDelays,
   reportError,
   restorePosition,
   updatePosition,
 } = {}) {
-  const time = createFakeScheduler();
+  const time = createFakeScheduler(OBSERVATION_START);
   const hostDocument = new FakeEventTarget();
   hostDocument.visibilityState = "visible";
   const container = new FakeEventTarget();
@@ -183,13 +204,22 @@ function createPdfJsHarness({
   frame.contentWindow = frameWindow;
   const calls = [];
   const errors = [];
+  const readPositionState =
+    getPositionTrackingState ??
+    (async (fileUrl) => {
+      const book = await getBook(fileUrl);
+      return book
+        ? { book, trackingGeneration: TEST_TRACKING_GENERATION }
+        : undefined;
+    });
   const tracking = createPdfJsPositionTracking({
     fileUrl: BOOK_URL,
     frame,
     hostDocument,
     createRestoreLifecycle,
     createSaveController,
-    getBook,
+    getPositionTrackingState: readPositionState,
+    handoffPendingPosition,
     handoffPosition,
     initialReadRetryDelays,
     reportError: reportError ?? ((error) => errors.push(error)),
@@ -201,7 +231,7 @@ function createPdfJsHarness({
         return { ...canonicalRecord(), ...position };
       }),
     scheduler: time.scheduler,
-    clock: time.clock,
+    clock: clock ?? time.clock,
   });
 
   async function finishRestore() {
@@ -596,9 +626,14 @@ test("initial tracked-book retries are bounded, cancellable, and terminal for ma
   });
 });
 
-test("target page render failure is reported and never arms tracking", async () => {
+test("target page render failure warns and falls back to live position saving", async () => {
   const renderError = new Error("target canvas failed");
+  const controllerBaselines = [];
   const harness = createPdfJsHarness({
+    createSaveController(options) {
+      controllerBaselines.push(options.initialPosition);
+      return createPositionSaveController(options);
+    },
     getBook: async () => canonicalRecord({ currentPage: 6, scrollTop: 600 }),
   });
   await harness.begin();
@@ -614,12 +649,36 @@ test("target page render failure is reported and never arms tracking", async () 
   await harness.tracking.settled();
 
   assert.deepEqual(harness.errors, [renderError]);
-  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
-  assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 0);
+  assert.deepEqual(controllerBaselines, [{ currentPage: 6, scrollTop: 0 }]);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+  assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 1);
+  harness.time.advanceBy(1_000);
+  await harness.tracking.settled();
+  assert.deepEqual(harness.calls, [], "restore failure alone must not overwrite storage");
+
+  harness.application.pdfViewer.currentPageNumber = 7;
+  harness.container.scrollTop = 700;
+  harness.container.dispatch("scroll");
+  harness.time.advanceBy(1_000);
+  await harness.tracking.settled();
+  harness.application.pdfViewer.currentPageNumber = 8;
+  harness.container.scrollTop = 810;
+  harness.eventBus.dispatch("updateviewarea", {
+    source: harness.application.pdfViewer,
+  });
+  harness.hostDocument.visibilityState = "hidden";
+  harness.hostDocument.dispatch("visibilitychange");
+  await harness.tracking.settled();
+
+  assert.deepEqual(harness.calls.map(({ position }) => position), [
+    { currentPage: 7, scrollTop: 700 },
+    { currentPage: 8, scrollTop: 810 },
+  ]);
+  assert.equal(controllerBaselines.length, 1, "fallback tracking must arm once");
   harness.tracking.destroy();
 });
 
-test("a cached FINISHED target render error is retained across the tracked-book read", async () => {
+test("a cached FINISHED target render error warns and falls back to tracking", async () => {
   const bookRead = deferred();
   const renderError = new Error("cached target canvas failed");
   const harness = createPdfJsHarness({ getBook: () => bookRead.promise });
@@ -639,7 +698,11 @@ test("a cached FINISHED target render error is retained across the tracked-book 
   await harness.tracking.settled();
 
   assert.deepEqual(harness.errors, [renderError]);
-  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+  assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 1);
+  harness.time.advanceBy(1_000);
+  await harness.tracking.settled();
+  assert.deepEqual(harness.calls, [], "fallback arming must preserve the saved record");
   assert.equal(
     harness.eventBus.listenerCount("pagerendered"),
     1,
@@ -931,8 +994,8 @@ test("pagehide during restore hands off only a genuine changed position", async 
     const handoffs = [];
     const harness = createPdfJsHarness({
       getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
-      handoffPosition(fileUrl, position) {
-        handoffs.push({ fileUrl, position });
+      handoffPosition(fileUrl, position, observation) {
+        handoffs.push({ fileUrl, observation, position });
       },
     });
     await harness.begin();
@@ -944,15 +1007,24 @@ test("pagehide during restore hands off only a genuine changed position", async 
     harness.eventBus.dispatch("pagechanging", {
       source: harness.application.pdfViewer,
     });
+    const observedAt = harness.time.clock.now();
+    harness.time.advanceBy(500);
 
     harness.tracking.handoff();
     harness.tracking.handoff();
-    assert.deepEqual(handoffs, [
-      {
-        fileUrl: BOOK_URL,
-        position: { currentPage: 5, scrollTop: 550 },
-      },
-    ]);
+    assert.equal(handoffs.length, 1);
+    assert.equal(handoffs[0].fileUrl, BOOK_URL);
+    assert.deepEqual(handoffs[0].position, {
+      currentPage: 5,
+      scrollTop: 550,
+    });
+    assert.match(handoffs[0].observation.viewerId, /^[0-9a-f]{32}$/);
+    assert.equal(handoffs[0].observation.sequence, 2);
+    assert.equal(
+      handoffs[0].observation.observedAt,
+      observedAt,
+      "pagehide must retain interaction time rather than assign teardown time",
+    );
     harness.tracking.destroy();
   });
 
@@ -994,29 +1066,43 @@ test("pagehide during restore hands off only a genuine changed position", async 
   });
 });
 
-test("pagehide during a pending tracked-book read hands off only genuine position activity", async (t) => {
-  await t.test("genuine activity sends one snapshot and missing storage safely no-ops", async () => {
-    const bookRead = deferred();
-    const fake = createChromeStorageFake();
+test("pagehide pending handoff is restricted to an in-flight viewer registration", async (t) => {
+  await t.test("deferred successful registration retains one genuine snapshot", async () => {
+    const existing = canonicalRecord();
+    const fake = createChromeStorageFake({
+      books: { [BOOK_URL]: existing },
+      positionOrder: {
+        [BOOK_URL]: {
+          version: 2,
+          generation: TEST_TRACKING_GENERATION,
+          winner: null,
+          viewers: {},
+        },
+      },
+    });
+    const registrationWrite = fake.holdNext("set", { after: true });
     const storage = createBooksStorage({
       storageArea: fake.local,
       lockManager: fake.locks,
     });
-    let workerCalls = 0;
     const handler = createPositionUpdateMessageHandler({
       extensionId: "abcdefghijkl",
-      updatePosition(...args) {
-        workerCalls += 1;
-        return storage.updatePosition(...args);
-      },
+      updatePendingPositionObservation:
+        storage.updatePendingPositionObservation,
+      updatePositionObservation: storage.updatePositionObservation,
     });
     const bridge = createMessageBridge(handler);
     const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
     const harness = createPdfJsHarness({
-      getBook: () => bookRead.promise,
+      getPositionTrackingState: storage.getPositionTrackingState,
+      handoffPendingPosition: client.handoffPendingPosition,
       handoffPosition: client.handoffPosition,
     });
     await harness.begin();
+    await registrationWrite.started;
+    const registeredViewer = Object.keys(
+      fake.snapshot().positionOrder[BOOK_URL].viewers,
+    )[0];
 
     harness.frameWindow.dispatch("keydown", { isTrusted: true });
     harness.application.pdfViewer.currentPageNumber = 5;
@@ -1026,24 +1112,51 @@ test("pagehide during a pending tracked-book read hands off only genuine positio
     });
     harness.tracking.handoff();
     harness.tracking.handoff();
+    await drainMicrotasks();
+    const responsesBeforeRelease = bridge.responses.length;
+    const messagesBeforeRelease = structuredClone(bridge.messages);
+    const bookBeforeRelease = fake.snapshot().books[BOOK_URL];
     harness.tracking.destroy();
-    await Promise.all(bridge.responses);
 
-    assert.equal(workerCalls, 1);
-    assert.deepEqual(fake.snapshot(), {}, "the worker must not create an untracked book");
+    registrationWrite.release();
+    const responses = await Promise.all(bridge.responses);
+    await harness.tracking.settled();
+
+    assert.equal(responsesBeforeRelease, 1, "pagehide must synchronously reach the worker");
+    assert.equal(messagesBeforeRelease.length, 1, "the snapshot must be handed off exactly once");
+    assert.deepEqual(bookBeforeRelease, existing, "the handoff must queue behind registration");
+    assert.equal(
+      messagesBeforeRelease[0].type,
+      "pdf-resume/private/handoff-pending-position",
+    );
+    assert.equal(messagesBeforeRelease[0].observation.viewerId, registeredViewer);
+    assert.equal(Object.hasOwn(messagesBeforeRelease[0], "trackingGeneration"), false);
+    assert.deepEqual(responses, [
+      {
+        type: "pdf-resume/private/update-position-result",
+        status: "updated",
+      },
+    ]);
+    assert.deepEqual(fake.snapshot().books[BOOK_URL], {
+      ...existing,
+      currentPage: 5,
+      scrollTop: 550,
+      lastReadAt: Math.floor(OBSERVATION_START / 1_000),
+    });
     assert.equal(harness.frameWindow.listenerCount("keydown"), 0);
-    bookRead.resolve(undefined);
   });
 
-  await t.test("genuine activity during a scheduled read retry sends one snapshot", async () => {
+  await t.test("genuine activity during a scheduled read retry sends nothing", async () => {
     const handoffs = [];
+    const recordHandoff = (fileUrl, position) => {
+      handoffs.push({ fileUrl, position });
+    };
     const harness = createPdfJsHarness({
       getBook: async () => {
         throw new Error("storage temporarily unavailable");
       },
-      handoffPosition(fileUrl, position) {
-        handoffs.push({ fileUrl, position });
-      },
+      handoffPendingPosition: recordHandoff,
+      handoffPosition: recordHandoff,
       initialReadRetryDelays: [1_000],
     });
     await harness.begin();
@@ -1055,12 +1168,7 @@ test("pagehide during a pending tracked-book read hands off only genuine positio
     harness.tracking.handoff();
     harness.tracking.handoff();
 
-    assert.deepEqual(handoffs, [
-      {
-        fileUrl: BOOK_URL,
-        position: { currentPage: 6, scrollTop: 660 },
-      },
-    ]);
+    assert.deepEqual(handoffs, []);
     harness.tracking.destroy();
     assert.equal(harness.time.pendingCount(), 0);
   });
@@ -1069,11 +1177,11 @@ test("pagehide during a pending tracked-book read hands off only genuine positio
     for (const programmaticChange of [false, true]) {
       const bookRead = deferred();
       const handoffs = [];
+      const recordHandoff = (...args) => handoffs.push(args);
       const harness = createPdfJsHarness({
         getBook: () => bookRead.promise,
-        handoffPosition(...args) {
-          handoffs.push(args);
-        },
+        handoffPendingPosition: recordHandoff,
+        handoffPosition: recordHandoff,
       });
       await harness.begin();
       if (programmaticChange) {
@@ -1093,11 +1201,11 @@ test("pagehide during a pending tracked-book read hands off only genuine positio
 
   await t.test("a resolved missing record retires intent without a handoff", async () => {
     const handoffs = [];
+    const recordHandoff = (...args) => handoffs.push(args);
     const harness = createPdfJsHarness({
       getBook: async () => undefined,
-      handoffPosition(...args) {
-        handoffs.push(args);
-      },
+      handoffPendingPosition: recordHandoff,
+      handoffPosition: recordHandoff,
     });
     await harness.begin();
     await harness.tracking.settled();
@@ -1132,6 +1240,134 @@ test("restore lifecycle is retired on replacement without arming or handing off"
   assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
   harness.tracking.handoff();
   assert.deepEqual(handoffs, []);
+  harness.tracking.destroy();
+});
+
+test("a stale restore rejection cannot arm fallback tracking", async () => {
+  const restore = deferred();
+  let controllerCreations = 0;
+  const harness = createPdfJsHarness({
+    createSaveController(options) {
+      controllerCreations += 1;
+      return createPositionSaveController(options);
+    },
+    restorePosition: () => restore.promise,
+  });
+  await harness.begin();
+  harness.application.pdfDocument = { id: "replacement", numPages: 2 };
+  harness.eventBus.dispatch("pagesdestroy", { source: harness.application.pdfViewer });
+  restore.reject(new Error("retired restore failed"));
+  await harness.tracking.settled();
+
+  assert.deepEqual(harness.errors, []);
+  assert.equal(controllerCreations, 0);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 0);
+  harness.tracking.destroy();
+});
+
+test("restore rejection preserves boundary activity for immediate pagehide handoff", async () => {
+  const restoreError = new Error("restore failed after user navigation");
+  const controllerBaselines = [];
+  const handoffs = [];
+  let harness;
+  harness = createPdfJsHarness({
+    createSaveController(options) {
+      controllerBaselines.push(options.initialPosition);
+      return createPositionSaveController(options);
+    },
+    getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
+    handoffPosition(fileUrl, position, observation) {
+      handoffs.push({ fileUrl, observation, position });
+    },
+    async restorePosition({ application, container, eventBus }) {
+      harness.frameWindow.dispatch("wheel", { isTrusted: true });
+      application.pdfViewer.currentPageNumber = 5;
+      container.scrollTop = 550;
+      eventBus.dispatch("updateviewarea", { source: application.pdfViewer });
+      throw restoreError;
+    },
+  });
+
+  await harness.begin();
+  await harness.tracking.settled();
+  harness.tracking.handoff();
+  harness.tracking.destroy();
+
+  assert.deepEqual(harness.errors, [restoreError]);
+  assert.deepEqual(controllerBaselines, [{ currentPage: 4, scrollTop: 400 }]);
+  assert.deepEqual(
+    handoffs.map(({ fileUrl, position }) => ({ fileUrl, position })),
+    [
+      {
+        fileUrl: BOOK_URL,
+        position: { currentPage: 5, scrollTop: 550 },
+      },
+    ],
+  );
+  assert.equal(handoffs[0].observation.sequence, 2);
+  assert.deepEqual(harness.calls, []);
+});
+
+test("restore rejection flushes boundary activity once on immediate replacement", async () => {
+  const restoreError = new Error("restore failed after user scroll");
+  let harness;
+  harness = createPdfJsHarness({
+    getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
+    async restorePosition({ application, container, eventBus }) {
+      harness.frameWindow.dispatch("wheel", { isTrusted: true });
+      application.pdfViewer.currentPageNumber = 5;
+      container.scrollTop = 550;
+      eventBus.dispatch("updateviewarea", { source: application.pdfViewer });
+      throw restoreError;
+    },
+  });
+
+  await harness.begin();
+  await harness.tracking.settled();
+  harness.eventBus.dispatch("pagesdestroy", {
+    source: harness.application.pdfViewer,
+  });
+  await harness.tracking.settled();
+
+  assert.deepEqual(harness.errors, [restoreError]);
+  assert.deepEqual(harness.calls.map(({ position }) => position), [
+    { currentPage: 5, scrollTop: 550 },
+  ]);
+  assert.equal(harness.time.pendingCount(), 0);
+  harness.tracking.destroy();
+});
+
+test("restore rejection does not persist restore-owned movement", async () => {
+  const restoreError = new Error("restore failed after programmatic movement");
+  const handoffs = [];
+  const harness = createPdfJsHarness({
+    getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
+    handoffPosition(...args) {
+      handoffs.push(args);
+    },
+    async restorePosition({ application, container, eventBus }) {
+      application.pdfViewer.currentPageNumber = 6;
+      container.scrollTop = 660;
+      eventBus.dispatch("pagechanging", { source: application.pdfViewer });
+      container.dispatch("scroll");
+      eventBus.dispatch("updateviewarea", { source: application.pdfViewer });
+      throw restoreError;
+    },
+  });
+
+  await harness.begin();
+  await harness.tracking.settled();
+  harness.tracking.handoff();
+  harness.eventBus.dispatch("pagesdestroy", {
+    source: harness.application.pdfViewer,
+  });
+  await harness.tracking.settled();
+
+  assert.deepEqual(harness.errors, [restoreError]);
+  assert.deepEqual(handoffs, []);
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.time.pendingCount(), 0);
   harness.tracking.destroy();
 });
 
@@ -1314,31 +1550,869 @@ test("pagehide hands off synchronously while hidden visibility uses the ordered 
   harness.tracking.destroy();
 });
 
-test("listeners are registered once and removed on teardown or document replacement", async () => {
-  const harness = createPdfJsHarness();
+test("pagesdestroy retirement preserves a failed flush through its scheduled retry", async () => {
+  const attempts = [];
+  const harness = createPdfJsHarness({
+    async updatePosition(fileUrl, position, observation) {
+      attempts.push({ fileUrl, observation, position });
+      if (attempts.length === 1) {
+        throw new Error("storage temporarily unavailable");
+      }
+      return { ...canonicalRecord(), ...position };
+    },
+  });
   await harness.ready();
 
-  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
-  assert.equal(harness.container.listenerCount("scroll"), 1);
   harness.application.pdfViewer.currentPageNumber = 10;
   harness.container.scrollTop = 1_000;
   harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
-  const replacement = { id: "replacement", numPages: 2 };
-  harness.application.pdfDocument = replacement;
   harness.eventBus.dispatch("pagesdestroy", { source: harness.application.pdfViewer });
-  await Promise.resolve();
+  await drainMicrotasks();
+
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.eventBus.listenerCount("updateviewarea"), 0);
+  assert.equal(harness.container.listenerCount("scroll"), 0);
+  assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 0);
+  assert.equal(attempts.length, 1);
+  assert.equal(harness.time.pendingCount(), 1);
+
+  harness.time.advanceBy(249);
+  assert.equal(attempts.length, 1, "retirement must honor the configured delay");
+  harness.time.advanceBy(1);
+  await harness.tracking.settled();
+
+  assert.deepEqual(
+    attempts.map(({ position }) => position),
+    [
+      { currentPage: 10, scrollTop: 1_000 },
+      { currentPage: 10, scrollTop: 1_000 },
+    ],
+  );
+  assert.deepEqual(
+    attempts[0].observation,
+    attempts[1].observation,
+    "the scheduled retry must retain the original observation order",
+  );
+  assert.equal(harness.time.pendingCount(), 0);
+  harness.tracking.destroy();
+});
+
+test(
+  "pagesdestroy retirement remains bounded across wall-clock rollback",
+  { timeout: 1_000 },
+  async () => {
+    const attempts = [];
+    let controllerDestroys = 0;
+    let wallTime = OBSERVATION_START;
+    const harness = createPdfJsHarness({
+      clock: { now: () => wallTime },
+      createSaveController(options) {
+        const controller = createPositionSaveController(options);
+        return Object.freeze({
+          ...controller,
+          destroy() {
+            controllerDestroys += 1;
+            controller.destroy();
+          },
+        });
+      },
+      async updatePosition(fileUrl, position, observation) {
+        attempts.push({ fileUrl, observation, position });
+        throw new Error("storage unavailable");
+      },
+    });
+    await harness.ready();
+
+    harness.application.pdfViewer.currentPageNumber = 10;
+    harness.container.scrollTop = 1_000;
+    harness.eventBus.dispatch("updateviewarea", {
+      source: harness.application.pdfViewer,
+    });
+    harness.eventBus.dispatch("pagesdestroy", {
+      source: harness.application.pdfViewer,
+    });
+    await drainMicrotasks();
+    assert.equal(attempts.length, 1);
+
+    wallTime -= 60_000;
+    for (const [index, delay] of [250, 1_000, 4_000].entries()) {
+      harness.time.advanceBy(delay);
+      await drainMicrotasks();
+      assert.equal(
+        attempts.length,
+        index + 2,
+        `retry ${index + 1} must run after its scheduler delay`,
+      );
+    }
+    await harness.tracking.settled();
+
+    assert.equal(controllerDestroys, 1);
+    assert.equal(harness.time.pendingCount(), 0);
+    assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+    assert.equal(harness.container.listenerCount("scroll"), 0);
+    assert.equal(
+      attempts.every(
+        ({ observation }) => observation.observedAt === OBSERVATION_START,
+      ),
+      true,
+      "retry timing must not replace the original observation timestamp",
+    );
+    assert.deepEqual(
+      attempts.map(({ observation }) => observation),
+      Array.from({ length: 4 }, () => attempts[0].observation),
+    );
+
+    harness.tracking.destroy();
+    assert.equal(controllerDestroys, 1);
+  },
+);
+
+test("pagesdestroy retirement exhausts bounded retries and releases its controller", async () => {
+  const attempts = [];
+  let controllerCreations = 0;
+  let controllerDestroys = 0;
+  const harness = createPdfJsHarness({
+    createSaveController(options) {
+      controllerCreations += 1;
+      const controller = createPositionSaveController(options);
+      return Object.freeze({
+        ...controller,
+        destroy() {
+          controllerDestroys += 1;
+          controller.destroy();
+        },
+      });
+    },
+    async updatePosition(fileUrl, position, observation) {
+      attempts.push({ fileUrl, observation, position });
+      throw new Error("storage unavailable");
+    },
+  });
+  await harness.ready();
+
+  harness.application.pdfViewer.currentPageNumber = 10;
+  harness.container.scrollTop = 1_000;
+  harness.eventBus.dispatch("updateviewarea", {
+    source: harness.application.pdfViewer,
+  });
+  harness.eventBus.dispatch("pagesdestroy", { source: harness.application.pdfViewer });
+  await drainMicrotasks();
+
+  assert.equal(attempts.length, 1);
+  for (const delay of [250, 1_000, 4_000]) {
+    harness.time.advanceBy(delay);
+    await drainMicrotasks();
+  }
+  await harness.tracking.settled();
+
+  assert.equal(attempts.length, 4);
+  assert.equal(harness.time.pendingCount(), 0);
+  assert.equal(controllerCreations, 1);
+  assert.equal(controllerDestroys, 1, "the exhausted controller must leave retirement");
   assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
   assert.equal(harness.container.listenerCount("scroll"), 0);
-  assert.equal(harness.eventBus.listenerCount("pagesinit"), 0);
-  harness.application.pdfViewer.currentPageNumber = 11;
-  harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
-  harness.time.advanceBy(1_000);
-  await harness.tracking.settled();
-  assert.deepEqual(harness.calls, [], "document replacement must not save");
 
   harness.tracking.destroy();
-  assert.equal(harness.frame.listenerCount("load"), 0);
-  assert.equal(harness.hostDocument.listenerCount("visibilitychange"), 0);
+  assert.equal(controllerDestroys, 1, "full destroy must not retain or destroy it twice");
+});
+
+test(
+  "full destroy bounds an in-flight pagesdestroy retirement",
+  { timeout: 1_000 },
+  async () => {
+    const retirementWrite = deferred();
+    const harness = createPdfJsHarness({
+      updatePosition: () => retirementWrite.promise,
+    });
+    await harness.ready();
+
+    harness.application.pdfViewer.currentPageNumber = 10;
+    harness.container.scrollTop = 1_000;
+    harness.eventBus.dispatch("pagechanging", {
+      source: harness.application.pdfViewer,
+    });
+    harness.eventBus.dispatch("pagesdestroy", {
+      source: harness.application.pdfViewer,
+    });
+    await drainMicrotasks();
+
+    let didSettle = false;
+    const settlement = harness.tracking.settled().then(() => {
+      didSettle = true;
+    });
+    await drainMicrotasks();
+    assert.equal(didSettle, false);
+
+    harness.tracking.destroy();
+    await settlement;
+    assert.equal(didSettle, true, "full destroy must bound retirement settlement");
+    assert.equal(harness.time.pendingCount(), 0);
+    assert.equal(harness.frame.listenerCount("load"), 0);
+    assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+    assert.equal(harness.container.listenerCount("scroll"), 0);
+
+    retirementWrite.reject(new Error("late storage failure"));
+    await settlement;
+    await drainMicrotasks();
+    assert.equal(
+      harness.time.pendingCount(),
+      0,
+      "a late failure must not restart retries",
+    );
+  },
+);
+
+test("replacement events enter only the new controller while the old controller retires", async () => {
+  const attempts = [];
+  let controllerCreations = 0;
+  const harness = createPdfJsHarness({
+    createSaveController(options) {
+      controllerCreations += 1;
+      return createPositionSaveController(options);
+    },
+    async restorePosition({ application, container, startTracking }) {
+      const currentPosition = {
+        currentPage: application.pdfViewer.currentPageNumber,
+        scrollTop: container.scrollTop,
+      };
+      startTracking(currentPosition, currentPosition);
+    },
+    async updatePosition(fileUrl, position, observation) {
+      attempts.push({ fileUrl, observation, position });
+      if (attempts.length === 1) {
+        throw new Error("storage temporarily unavailable");
+      }
+      return { ...canonicalRecord(), ...position };
+    },
+  });
+  await harness.ready();
+
+  harness.application.pdfViewer.currentPageNumber = 10;
+  harness.container.scrollTop = 1_000;
+  harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
+  harness.eventBus.dispatch("pagesdestroy", { source: harness.application.pdfViewer });
+  await drainMicrotasks();
+  assert.equal(attempts.length, 1);
+  assert.equal(harness.time.pendingCount(), 1);
+
+  harness.application.pdfViewer.currentPageNumber = 11;
+  harness.container.scrollTop = 1_100;
+  harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
+  harness.eventBus.dispatch("updateviewarea", { source: harness.application.pdfViewer });
+  harness.container.dispatch("scroll");
+  harness.hostDocument.visibilityState = "hidden";
+  harness.hostDocument.dispatch("visibilitychange");
+  await drainMicrotasks();
+  assert.equal(attempts.length, 1, "retired-document events must not be observed");
+
+  const replacement = { id: "replacement", numPages: 2 };
+  harness.application.pdfDocument = replacement;
+  harness.application.pdfViewer.pagesCount = 2;
+  harness.hostDocument.visibilityState = "visible";
+  harness.frame.dispatch("load");
+  await drainMicrotasks();
+  await harness.finishRestore();
+  assert.equal(controllerCreations, 2);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 1);
+
+  harness.application.pdfViewer.currentPageNumber = 2;
+  harness.container.scrollTop = 200;
+  harness.eventBus.dispatch("updateviewarea", {
+    source: harness.application.pdfViewer,
+  });
+  harness.hostDocument.visibilityState = "hidden";
+  harness.hostDocument.dispatch("visibilitychange");
+  await drainMicrotasks();
+  assert.deepEqual(
+    attempts.map(({ position }) => position),
+    [
+      { currentPage: 10, scrollTop: 1_000 },
+      { currentPage: 2, scrollTop: 200 },
+    ],
+  );
+
+  harness.time.advanceBy(250);
+  await harness.tracking.settled();
+  assert.deepEqual(
+    attempts.map(({ position }) => position),
+    [
+      { currentPage: 10, scrollTop: 1_000 },
+      { currentPage: 2, scrollTop: 200 },
+      { currentPage: 10, scrollTop: 1_000 },
+    ],
+  );
+  assert.deepEqual(attempts[0].observation, attempts[2].observation);
+  assert.notDeepEqual(
+    attempts[1].observation,
+    attempts[0].observation,
+    "the replacement controller must own an independent observation",
+  );
+  assert.equal(harness.time.pendingCount(), 0);
+
+  harness.tracking.destroy();
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.container.listenerCount("scroll"), 0);
+});
+
+test("an older observation delayed in one viewer cannot overwrite a newer viewer", async () => {
+  const fake = createChromeStorageFake({
+    books: { [BOOK_URL]: canonicalRecord() },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => 1_800_000_000,
+  });
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePendingPositionObservation: storage.updatePendingPositionObservation,
+    updatePositionObservation: storage.updatePositionObservation,
+  });
+  const bridge = createMessageBridge(handler);
+  const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
+  const viewerA = createController({ update: client.updatePosition });
+  const viewerB = createController({ update: client.updatePosition });
+
+  viewerA.controller.observe({ currentPage: 2, scrollTop: 200 });
+  viewerB.time.advanceBy(100);
+  viewerB.controller.observe({ currentPage: 3, scrollTop: 300 });
+  await viewerB.controller.flush();
+  viewerA.time.advanceBy(1_000);
+  await viewerA.controller.settled();
+
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 3, scrollTop: 300 },
+  );
+
+  viewerA.controller.observe({ currentPage: 1, scrollTop: 50 });
+  await viewerA.controller.flush();
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 1, scrollTop: 50 },
+    "a chronologically later backward navigation must win",
+  );
+});
+
+test("an older failed observation keeps its order through retry and cannot regress another viewer", async () => {
+  const fake = createChromeStorageFake({
+    books: { [BOOK_URL]: canonicalRecord() },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => 1_800_000_000,
+  });
+  let firstAttempt = true;
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePendingPositionObservation: storage.updatePendingPositionObservation,
+    async updatePositionObservation(...args) {
+      if (firstAttempt) {
+        firstAttempt = false;
+        throw new Error("worker write failed");
+      }
+      return storage.updatePositionObservation(...args);
+    },
+  });
+  const bridge = createMessageBridge(handler);
+  const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
+  const viewerA = createController({ update: client.updatePosition });
+  const viewerB = createController({ update: client.updatePosition });
+
+  viewerA.controller.observe({ currentPage: 2, scrollTop: 200 });
+  viewerA.time.advanceBy(1_000);
+  assert.deepEqual(await viewerA.controller.settled(), {
+    disabled: false,
+    durable: false,
+    pending: true,
+    retryPending: true,
+  });
+
+  viewerB.time.advanceBy(2_000);
+  viewerB.controller.observe({ currentPage: 4, scrollTop: 400 });
+  await viewerB.controller.flush();
+  viewerA.time.advanceBy(250);
+  await viewerA.controller.settled();
+
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 4, scrollTop: 400 },
+  );
+  assert.deepEqual(
+    bridge.messages[0].observation,
+    bridge.messages[2].observation,
+    "retry must retain the original observation order",
+  );
+  assert.equal(
+    bridge.messages[0].trackingGeneration,
+    bridge.messages[2].trackingGeneration,
+    "retry must retain the original tracking generation",
+  );
+});
+
+test("same-viewer sequence orders equal-time messages independently of receipt", async () => {
+  const fake = createChromeStorageFake({
+    books: { [BOOK_URL]: canonicalRecord() },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => 1_800_000_000,
+  });
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePendingPositionObservation: storage.updatePendingPositionObservation,
+    updatePositionObservation: storage.updatePositionObservation,
+    now: () => OBSERVATION_START + 1_000,
+  });
+  const viewerId = "a".repeat(32);
+  const older = {
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage: 4, scrollTop: 400 },
+    observation: { viewerId, sequence: 1, observedAt: OBSERVATION_START },
+  };
+  const newer = {
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage: 5, scrollTop: 500 },
+    observation: { viewerId, sequence: 2, observedAt: OBSERVATION_START },
+  };
+  const bridge = createMessageBridge(handler);
+
+  await bridge.sendMessage(newer);
+  assert.deepEqual(await bridge.sendMessage(older), {
+    type: "pdf-resume/private/update-position-result",
+    status: "stale",
+  });
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 5, scrollTop: 500 },
+  );
+});
+
+test("same-viewer sequence wins across wall-clock rollback before and after worker restart", async () => {
+  const fake = createChromeStorageFake({
+    books: { [BOOK_URL]: canonicalRecord() },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => 1_800_000_000,
+  });
+  const viewerId = "e".repeat(32);
+  const createWorker = () =>
+    createMessageBridge(
+      createPositionUpdateMessageHandler({
+        extensionId: "abcdefghijkl",
+        updatePendingPositionObservation:
+          storage.updatePendingPositionObservation,
+        updatePositionObservation: storage.updatePositionObservation,
+        now: () => OBSERVATION_START + 10_000,
+      }),
+    );
+  const message = (currentPage, sequence, observedAt) => ({
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage, scrollTop: currentPage * 100 },
+    observation: { viewerId, sequence, observedAt },
+  });
+  const firstWorker = createWorker();
+
+  assert.equal(
+    (await firstWorker.sendMessage(message(4, 10, OBSERVATION_START + 5_000)))
+      .status,
+    "updated",
+  );
+  assert.equal(
+    (await firstWorker.sendMessage(message(5, 11, OBSERVATION_START + 4_000)))
+      .status,
+    "updated",
+  );
+  assert.equal(
+    (await firstWorker.sendMessage(message(2, 10, OBSERVATION_START + 6_000)))
+      .status,
+    "stale",
+  );
+  assert.equal(fake.snapshot().books[BOOK_URL].lastReadAt, 1_750_000_005);
+
+  const restartedWorker = createWorker();
+  assert.equal(
+    (await restartedWorker.sendMessage(message(6, 12, OBSERVATION_START + 3_000)))
+      .status,
+    "updated",
+  );
+  const afterRollback = fake.snapshot();
+  assert.deepEqual(
+    {
+      currentPage: afterRollback.books[BOOK_URL].currentPage,
+      lastReadAt: afterRollback.books[BOOK_URL].lastReadAt,
+      scrollTop: afterRollback.books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 6, lastReadAt: 1_750_000_005, scrollTop: 600 },
+  );
+  assert.equal(
+    (await restartedWorker.sendMessage(message(7, 12, OBSERVATION_START + 7_000)))
+      .status,
+    "stale",
+  );
+  assert.equal(
+    (await restartedWorker.sendMessage(message(8, 11, OBSERVATION_START + 8_000)))
+      .status,
+    "stale",
+  );
+  assert.deepEqual(fake.snapshot(), afterRollback);
+});
+
+test("a higher known-viewer sequence survives receiver clock rollback while an unknown future viewer is invalid", async () => {
+  let receiverNow = 100_000;
+  const fake = createChromeStorageFake({
+    books: {
+      [BOOK_URL]: canonicalRecord({ addedAt: 0, lastReadAt: 0 }),
+    },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => Math.floor(receiverNow / 1_000),
+    nowMilliseconds: () => receiverNow,
+  });
+  const bridge = createMessageBridge(
+    createPositionUpdateMessageHandler({
+      extensionId: "abcdefghijkl",
+      updatePendingPositionObservation:
+        storage.updatePendingPositionObservation,
+      updatePositionObservation: storage.updatePositionObservation,
+      now: () => receiverNow,
+    }),
+  );
+  const viewerId = "1".repeat(32);
+  const message = (currentPage, sequence, observedAt, messageViewerId = viewerId) => ({
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage, scrollTop: currentPage * 100 },
+    observation: { viewerId: messageViewerId, sequence, observedAt },
+  });
+
+  assert.equal((await bridge.sendMessage(message(10, 10, 100_000))).status, "updated");
+  receiverNow = 40_000;
+  assert.equal((await bridge.sendMessage(message(11, 11, 101_000))).status, "updated");
+  const afterKnownViewer = fake.snapshot();
+  assert.equal(afterKnownViewer.books[BOOK_URL].currentPage, 11);
+
+  assert.equal(
+    (await bridge.sendMessage(message(12, 1, 101_000, "2".repeat(32)))).status,
+    "invalid",
+  );
+  assert.deepEqual(fake.snapshot(), afterKnownViewer);
+});
+
+test("a fresh registered viewer's first save survives receiver clock rollback", async () => {
+  let receiverSeconds = 100;
+  const fake = createChromeStorageFake();
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => receiverSeconds,
+    nowMilliseconds: () => receiverSeconds * 1_000,
+  });
+  await storage.trackBook(BOOK_URL, { title: "A Book" });
+  const viewerId = "2".repeat(32);
+  const trackingState = await storage.getPositionTrackingState(
+    BOOK_URL,
+    viewerId,
+  );
+  receiverSeconds = 40;
+
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePendingPositionObservation: storage.updatePendingPositionObservation,
+    updatePositionObservation: storage.updatePositionObservation,
+  });
+  const bridge = createMessageBridge(handler);
+  const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
+  const observationSource = createPositionObservationSource({
+    clock: { now: () => 40_000 },
+    viewerId,
+  });
+  const { controller } = createController({
+    initialPosition: trackingState.book,
+    observationSource,
+    trackingGeneration: trackingState.trackingGeneration,
+    update: client.updatePosition,
+  });
+
+  controller.observe({ currentPage: 2, scrollTop: 200 });
+  await controller.flush();
+
+  assert.deepEqual(await bridge.responses[0], {
+    type: "pdf-resume/private/update-position-result",
+    status: "updated",
+  });
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      lastReadAt: fake.snapshot().books[BOOK_URL].lastReadAt,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 2, lastReadAt: 100, scrollTop: 200 },
+  );
+  controller.destroy();
+});
+
+test("durable per-viewer order makes the rollback A/B/A cycle stale after restart", async () => {
+  const fake = createChromeStorageFake({
+    books: {
+      [BOOK_URL]: canonicalRecord({ addedAt: 0, lastReadAt: 0 }),
+    },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => 2_000,
+  });
+  const createWorker = () =>
+    createMessageBridge(
+      createPositionUpdateMessageHandler({
+        extensionId: "abcdefghijkl",
+        updatePendingPositionObservation:
+          storage.updatePendingPositionObservation,
+        updatePositionObservation: storage.updatePositionObservation,
+        now: () => 2_000_000,
+      }),
+    );
+  const message = (viewerId, sequence, observedAt, currentPage) => ({
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage, scrollTop: currentPage * 100 },
+    observation: { viewerId, sequence, observedAt },
+  });
+  const viewerA = "a".repeat(32);
+  const viewerB = "b".repeat(32);
+  const firstWorker = createWorker();
+
+  assert.equal(
+    (await firstWorker.sendMessage(message(viewerA, 10, 1_005_000, 10))).status,
+    "updated",
+  );
+  assert.equal(
+    (await firstWorker.sendMessage(message(viewerA, 11, 1_004_000, 11))).status,
+    "updated",
+  );
+  assert.equal(
+    (await firstWorker.sendMessage(message(viewerB, 1, 1_004_500, 20))).status,
+    "stale",
+  );
+  const beforeDuplicate = fake.snapshot();
+
+  const restartedWorker = createWorker();
+  assert.equal(
+    (await restartedWorker.sendMessage(message(viewerA, 10, 1_005_000, 2))).status,
+    "stale",
+  );
+  assert.deepEqual(fake.snapshot(), beforeDuplicate);
+  assert.equal(fake.snapshot().books[BOOK_URL].currentPage, 11);
+});
+
+test("lower and duplicate viewer sequences stay stale after other viewers and restarts", async () => {
+  const fake = createChromeStorageFake({
+    books: {
+      [BOOK_URL]: canonicalRecord({ addedAt: 0, lastReadAt: 0 }),
+    },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => 2_000,
+    nowMilliseconds: () => 2_000_000,
+  });
+  const createWorker = () =>
+    createMessageBridge(
+      createPositionUpdateMessageHandler({
+        extensionId: "abcdefghijkl",
+        updatePendingPositionObservation:
+          storage.updatePendingPositionObservation,
+        updatePositionObservation: storage.updatePositionObservation,
+      }),
+    );
+  const message = (viewerId, sequence, observedAt, currentPage) => ({
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage, scrollTop: currentPage * 100 },
+    observation: { viewerId, sequence, observedAt },
+  });
+  const viewerA = "3".repeat(32);
+  const firstWorker = createWorker();
+
+  assert.equal(
+    (await firstWorker.sendMessage(message(viewerA, 5, 1_000_000, 5))).status,
+    "updated",
+  );
+  assert.equal(
+    (
+      await firstWorker.sendMessage(
+        message("4".repeat(32), 1, 1_001_000, 10),
+      )
+    ).status,
+    "updated",
+  );
+  assert.equal(
+    (
+      await firstWorker.sendMessage(
+        message("5".repeat(32), 1, 1_002_000, 20),
+      )
+    ).status,
+    "updated",
+  );
+  const beforeDelayedA = fake.snapshot();
+  const writesBeforeDelayedA = fake.operations.filter(
+    ({ method, phase }) => method === "set" && phase === "start",
+  ).length;
+
+  const restartedWorker = createWorker();
+  assert.equal(
+    (await restartedWorker.sendMessage(message(viewerA, 5, 1_003_000, 2)))
+      .status,
+    "stale",
+  );
+  assert.equal(
+    (await restartedWorker.sendMessage(message(viewerA, 4, 1_004_000, 3)))
+      .status,
+    "stale",
+  );
+  assert.deepEqual(fake.snapshot(), beforeDelayedA);
+  assert.equal(fake.snapshot().books[BOOK_URL].currentPage, 20);
+  assert.equal(
+    fake.operations.filter(
+      ({ method, phase }) => method === "set" && phase === "start",
+    ).length,
+    writesBeforeDelayedA,
+  );
+});
+
+test("worker restart retains the full durable observation order within one second", async () => {
+  const fake = createChromeStorageFake({
+    books: { [BOOK_URL]: canonicalRecord() },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+    now: () => 1_800_000_000,
+  });
+  const createHandler = () =>
+    createPositionUpdateMessageHandler({
+      extensionId: "abcdefghijkl",
+      updatePendingPositionObservation:
+        storage.updatePendingPositionObservation,
+      updatePositionObservation: storage.updatePositionObservation,
+      now: () => OBSERVATION_START + 10_000,
+    });
+  const durableObservation = OBSERVATION_START + 2_100;
+  const firstWorker = createMessageBridge(createHandler());
+  await firstWorker.sendMessage({
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage: 8, scrollTop: 800 },
+    observation: {
+      viewerId: "b".repeat(32),
+      sequence: 1,
+      observedAt: durableObservation,
+    },
+  });
+
+  const writesBeforeRestart = fake.operations.filter(
+    ({ method, phase }) => method === "set" && phase === "start",
+  ).length;
+  const restartedWorker = createMessageBridge(createHandler());
+  assert.deepEqual(
+    await restartedWorker.sendMessage({
+      type: "pdf-resume/private/update-position",
+      trackingGeneration: TEST_TRACKING_GENERATION,
+      fileUrl: BOOK_URL,
+      position: { currentPage: 2, scrollTop: 200 },
+      observation: {
+        viewerId: "a".repeat(32),
+        sequence: 1,
+        observedAt: OBSERVATION_START + 2_000,
+      },
+    }),
+    {
+      type: "pdf-resume/private/update-position-result",
+      status: "stale",
+    },
+  );
+  assert.equal(
+    fake.operations.filter(
+      ({ method, phase }) => method === "set" && phase === "start",
+    ).length,
+    writesBeforeRestart + 1,
+    "a losing new viewer persists its high-water mark without changing the book",
+  );
+  assert.equal(fake.snapshot().books[BOOK_URL].currentPage, 8);
+  assert.deepEqual(fake.snapshot().positionOrder[BOOK_URL], {
+    version: 2,
+    generation: TEST_TRACKING_GENERATION,
+    winner: {
+      effectiveTime: durableObservation,
+      viewerId: "b".repeat(32),
+      sequence: 1,
+    },
+    viewers: {
+      ["a".repeat(32)]: {
+        effectiveTime: OBSERVATION_START + 2_000,
+        sequence: 1,
+      },
+      ["b".repeat(32)]: {
+        effectiveTime: durableObservation,
+        sequence: 1,
+      },
+    },
+  });
+
+  await restartedWorker.sendMessage({
+    type: "pdf-resume/private/update-position",
+    trackingGeneration: TEST_TRACKING_GENERATION,
+    fileUrl: BOOK_URL,
+    position: { currentPage: 3, scrollTop: 300 },
+    observation: {
+      viewerId: "c".repeat(32),
+      sequence: 1,
+      observedAt: OBSERVATION_START + 2_900,
+    },
+  });
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      lastReadAt: fake.snapshot().books[BOOK_URL].lastReadAt,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    {
+      currentPage: 3,
+      lastReadAt: Math.floor(durableObservation / 1_000),
+      scrollTop: 300,
+    },
+    "a newer same-second observation after restart remains eligible",
+  );
 });
 
 test("pagehide handoff queues behind an older worker write and wins without a duplicate viewer writer", async () => {
@@ -1354,14 +2428,16 @@ test("pagehide handoff queues behind an older worker write and wins without a du
   });
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePosition: async (fileUrl, position) => {
-      workerCalls.push({ fileUrl, position });
+    updatePendingPositionObservation: storage.updatePendingPositionObservation,
+    updatePositionObservation: async (...args) => {
+      const [fileUrl, position, observation] = args;
+      workerCalls.push({ fileUrl, observation, position });
       if (workerCalls.length === 1) {
         await firstWrite.promise;
       }
-      const updated = await storage.updatePosition(fileUrl, position);
+      const status = await storage.updatePositionObservation(...args);
       completedPositions.push(position);
-      return updated;
+      return status;
     },
   });
   const bridge = createMessageBridge(handler);
@@ -1406,6 +2482,20 @@ test("pagehide handoff queues behind an older worker write and wins without a du
     { currentPage: 2, scrollTop: 200 },
     { currentPage: 3, scrollTop: 300 },
   ]);
+  assert.equal(
+    bridge.messages[0].observation.viewerId,
+    bridge.messages[1].observation.viewerId,
+  );
+  assert.equal(
+    bridge.messages[0].observation.sequence <
+      bridge.messages[1].observation.sequence,
+    true,
+  );
+  assert.equal(
+    bridge.messages[0].observation.observedAt <
+      bridge.messages[1].observation.observedAt,
+    true,
+  );
   assert.deepEqual(
     {
       currentPage: fake.snapshot().books[BOOK_URL].currentPage,
@@ -1415,29 +2505,138 @@ test("pagehide handoff queues behind an older worker write and wins without a du
   );
 });
 
+test("pagehide hands off a return to the durable baseline over an older in-flight save", async () => {
+  const firstWrite = deferred();
+  const workerCalls = [];
+  const fake = createChromeStorageFake({
+    books: { [BOOK_URL]: canonicalRecord() },
+  });
+  const storage = createBooksStorage({
+    storageArea: fake.local,
+    lockManager: fake.locks,
+  });
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    updatePendingPositionObservation: storage.updatePendingPositionObservation,
+    updatePositionObservation: async (...args) => {
+      const [fileUrl, position, observation] = args;
+      workerCalls.push({ fileUrl, observation, position });
+      if (workerCalls.length === 1) {
+        await firstWrite.promise;
+      }
+      return storage.updatePositionObservation(...args);
+    },
+  });
+  const bridge = createMessageBridge(handler);
+  const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
+  const harness = createPdfJsHarness({
+    handoffPosition: client.handoffPosition,
+    updatePosition: client.updatePosition,
+  });
+  await harness.ready();
+
+  harness.application.pdfViewer.currentPageNumber = 2;
+  harness.container.scrollTop = 200;
+  harness.eventBus.dispatch("pagechanging", {
+    source: harness.application.pdfViewer,
+  });
+  harness.time.advanceBy(1_000);
+  await drainMicrotasks();
+  assert.equal(workerCalls.length, 1);
+
+  harness.application.pdfViewer.currentPageNumber = 1;
+  harness.container.scrollTop = 0;
+  harness.eventBus.dispatch("pagechanging", {
+    source: harness.application.pdfViewer,
+  });
+  harness.tracking.handoff();
+  assert.equal(bridge.responses.length, 2);
+  assert.deepEqual(bridge.messages.map(({ position }) => position), [
+    { currentPage: 2, scrollTop: 200 },
+    { currentPage: 1, scrollTop: 0 },
+  ]);
+  assert.equal(
+    bridge.messages[1].observation.sequence >
+      bridge.messages[0].observation.sequence,
+    true,
+  );
+  harness.tracking.destroy();
+
+  firstWrite.resolve();
+  await Promise.all(bridge.responses);
+  assert.deepEqual(
+    {
+      currentPage: fake.snapshot().books[BOOK_URL].currentPage,
+      scrollTop: fake.snapshot().books[BOOK_URL].scrollTop,
+    },
+    { currentPage: 1, scrollTop: 0 },
+  );
+});
+
+test("a durable baseline with no older pending save emits no handoff", async () => {
+  const { controller } = createController();
+
+  assert.equal(
+    controller.prepareHandoff({ currentPage: 1, scrollTop: 0 }),
+    undefined,
+  );
+  controller.destroy();
+});
+
 test("worker messaging validates private canonical updates and never creates an untracked book", async () => {
   const fake = createChromeStorageFake();
   const storage = createBooksStorage({
     storageArea: fake.local,
     lockManager: fake.locks,
+    now: () => Math.floor(OBSERVATION_START / 1_000),
   });
+  let pendingUpdateCalls = 0;
   let updateCalls = 0;
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePosition: async (...args) => {
-      updateCalls += 1;
-      return storage.updatePosition(...args);
+    async updatePendingPositionObservation(...args) {
+      pendingUpdateCalls += 1;
+      return storage.updatePendingPositionObservation(...args);
     },
+    updatePositionObservation: async (...args) => {
+      updateCalls += 1;
+      return storage.updatePositionObservation(...args);
+    },
+    now: () => OBSERVATION_START + 10_000,
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
+  const observations = createPositionObservationSource({
+    clock: { now: () => OBSERVATION_START },
+    viewerId: "d".repeat(32),
+  });
+  const firstObservation = observations.next();
 
   assert.equal(
-    await client.updatePosition(BOOK_URL, { currentPage: 2, scrollTop: 20 }),
+    await client.updatePosition(
+      BOOK_URL,
+      { currentPage: 2, scrollTop: 20 },
+      firstObservation,
+      TEST_TRACKING_GENERATION,
+    ),
     undefined,
   );
   assert.deepEqual(fake.snapshot(), {});
   assert.equal(updateCalls, 1);
+  assert.deepEqual(
+    await bridge.sendMessage({
+      type: "pdf-resume/private/handoff-pending-position",
+      fileUrl: BOOK_URL,
+      position: { currentPage: 2, scrollTop: 20 },
+      observation: firstObservation,
+    }),
+    {
+      type: "pdf-resume/private/update-position-result",
+      status: "missing",
+    },
+  );
+  assert.equal(pendingUpdateCalls, 1);
+  assert.deepEqual(fake.snapshot(), {});
 
   let sendCalls = 0;
   const rejectingClient = createPositionUpdateClient({
@@ -1446,48 +2645,164 @@ test("worker messaging validates private canonical updates and never creates an 
     },
   });
   await assert.rejects(
-    rejectingClient.updatePosition(BOOK_URL, {
-      currentPage: 2,
-      scrollTop: 20,
-      unexpected: true,
-    }),
+    rejectingClient.updatePosition(
+      BOOK_URL,
+      {
+        currentPage: 2,
+        scrollTop: 20,
+        unexpected: true,
+      },
+      firstObservation,
+      TEST_TRACKING_GENERATION,
+    ),
     /exactly the supported fields/i,
   );
   await assert.rejects(
-    rejectingClient.updatePosition("file:///Users/reader/Books/A Book.pdf", {
-      currentPage: 2,
-      scrollTop: 20,
-    }),
+    rejectingClient.updatePosition(
+      "file:///Users/reader/Books/A Book.pdf",
+      { currentPage: 2, scrollTop: 20 },
+      firstObservation,
+      TEST_TRACKING_GENERATION,
+    ),
     /canonical/i,
   );
+  for (const invalidObservation of [
+    undefined,
+    {},
+    { ...firstObservation, viewerId: "not-an-id" },
+    { ...firstObservation, sequence: 0 },
+    { ...firstObservation, observedAt: 1.5 },
+    { ...firstObservation, extra: true },
+  ]) {
+    await assert.rejects(
+      rejectingClient.updatePosition(
+        BOOK_URL,
+        { currentPage: 2, scrollTop: 20 },
+        invalidObservation,
+        TEST_TRACKING_GENERATION,
+      ),
+      /position observation/i,
+    );
+  }
   assert.equal(sendCalls, 0);
 
-  let invalidResponse;
-  const keptInvalidChannel = handler(
+  const invalidMessages = [
     {
       type: "pdf-resume/private/update-position",
+      trackingGeneration: TEST_TRACKING_GENERATION,
       fileUrl: "https://example.test/book.pdf",
       position: { currentPage: 2, scrollTop: 20 },
+      observation: firstObservation,
     },
-    { id: "abcdefghijkl" },
-    (response) => {
-      invalidResponse = response;
+    {
+      type: "pdf-resume/private/update-position",
+      fileUrl: BOOK_URL,
+      position: { currentPage: 2, scrollTop: 20 },
+      observation: firstObservation,
+    },
+    {
+      type: "pdf-resume/private/update-position",
+      trackingGeneration: TEST_TRACKING_GENERATION,
+      fileUrl: BOOK_URL,
+      position: { currentPage: 2, scrollTop: 20 },
+      observation: firstObservation,
+      extra: true,
+    },
+    {
+      type: "pdf-resume/private/update-position",
+      trackingGeneration: "not-a-generation",
+      fileUrl: BOOK_URL,
+      position: { currentPage: 2, scrollTop: 20 },
+      observation: firstObservation,
+    },
+    {
+      type: "pdf-resume/private/handoff-pending-position",
+      trackingGeneration: TEST_TRACKING_GENERATION,
+      fileUrl: BOOK_URL,
+      position: { currentPage: 2, scrollTop: 20 },
+      observation: firstObservation,
+    },
+    {
+      type: "pdf-resume/private/handoff-pending-position",
+      fileUrl: "https://example.test/book.pdf",
+      position: { currentPage: 2, scrollTop: 20 },
+      observation: firstObservation,
+    },
+  ];
+  for (const message of invalidMessages) {
+    let invalidResponse;
+    assert.equal(
+      handler(message, { id: "abcdefghijkl" }, (response) => {
+        invalidResponse = response;
+      }),
+      false,
+    );
+    assert.deepEqual(invalidResponse, {
+      type: "pdf-resume/private/update-position-result",
+      status: "invalid",
+    });
+  }
+  assert.equal(pendingUpdateCalls, 1);
+  assert.equal(updateCalls, 1);
+  assert.equal(Object.hasOwn(fake.snapshot(), "positionOrder"), false);
+
+  await storage.trackBook(BOOK_URL, { title: "A Book" });
+  const beforeUnregisteredHandoff = fake.snapshot();
+  assert.deepEqual(
+    await bridge.sendMessage({
+      type: "pdf-resume/private/handoff-pending-position",
+      fileUrl: BOOK_URL,
+      position: { currentPage: 9, scrollTop: 90 },
+      observation: firstObservation,
+    }),
+    {
+      type: "pdf-resume/private/update-position-result",
+      status: "stale",
     },
   );
-  assert.equal(keptInvalidChannel, false);
-  assert.deepEqual(invalidResponse, {
-    type: "pdf-resume/private/update-position-result",
-    status: "invalid",
+  assert.equal(pendingUpdateCalls, 2);
+  assert.deepEqual(fake.snapshot(), beforeUnregisteredHandoff);
+
+  const trackingState = await storage.getPositionTrackingState(
+    BOOK_URL,
+    observations.viewerId,
+  );
+  assert.deepEqual(
+    await client.updatePosition(
+      BOOK_URL,
+      { currentPage: 3, scrollTop: 30 },
+      observations.next(),
+      trackingState.trackingGeneration,
+    ),
+    { currentPage: 3, scrollTop: 30 },
+    "invalid and missing updates must not poison a later retrack",
+  );
+  assert.equal(updateCalls, 2);
+  assert.deepEqual(fake.snapshot().positionOrder[BOOK_URL], {
+    version: 2,
+    generation: trackingState.trackingGeneration,
+    winner: {
+      effectiveTime: OBSERVATION_START,
+      viewerId: firstObservation.viewerId,
+      sequence: 2,
+    },
+    viewers: {
+      [firstObservation.viewerId]: {
+        effectiveTime: OBSERVATION_START,
+        sequence: 2,
+      },
+    },
   });
-  assert.equal(updateCalls, 1);
 
   let privateResponse;
   assert.equal(
     handler(
       {
         type: "pdf-resume/private/update-position",
+        trackingGeneration: trackingState.trackingGeneration,
         fileUrl: BOOK_URL,
         position: { currentPage: 2, scrollTop: 20 },
+        observation: firstObservation,
       },
       { id: "another-extension" },
       (response) => {
@@ -1497,7 +2812,7 @@ test("worker messaging validates private canonical updates and never creates an 
     false,
   );
   assert.equal(privateResponse.status, "invalid");
-  assert.equal(updateCalls, 1);
+  assert.equal(updateCalls, 2);
 
   let unknownResponse = false;
   assert.equal(
@@ -1522,10 +2837,19 @@ test("worker messaging validates private canonical updates and never creates an 
   ];
   for (const failedClient of failedHandoffs) {
     assert.doesNotThrow(() =>
-      failedClient.handoffPosition(BOOK_URL, {
-        currentPage: 2,
-        scrollTop: 20,
-      }),
+      failedClient.handoffPendingPosition(
+        BOOK_URL,
+        { currentPage: 2, scrollTop: 20 },
+        firstObservation,
+      ),
+    );
+    assert.doesNotThrow(() =>
+      failedClient.handoffPosition(
+        BOOK_URL,
+        { currentPage: 2, scrollTop: 20 },
+        firstObservation,
+        TEST_TRACKING_GENERATION,
+      ),
     );
   }
   await drainMicrotasks();
@@ -1645,6 +2969,140 @@ test("viewer explains how to enable local file access without starting the PDF",
   assert.equal(frame.listenerCount("load"), 0);
 });
 
+test("post-boot startup failures clean every acquired viewer resource", async (t) => {
+  const startupErrorMessage =
+    "The PDF viewer could not be initialized. Reload this page to try again.";
+  const stages = [
+    {
+      expectedMetadataDestroys: 0,
+      expectedTrackingDestroys: 0,
+      name: "position update client validation",
+      configure({ options }) {
+        options.sendMessage = null;
+      },
+    },
+    {
+      expectedMetadataDestroys: 0,
+      expectedTrackingDestroys: 0,
+      name: "metadata lifecycle creation",
+      configure({ failure, options }) {
+        options.createMetadataHydration = () => {
+          throw failure;
+        };
+      },
+    },
+    {
+      expectedMetadataDestroys: 1,
+      expectedTrackingDestroys: 0,
+      name: "position tracking creation",
+      configure({ failure, options }) {
+        options.createPositionTracking = () => {
+          throw failure;
+        };
+      },
+    },
+    {
+      expectedMetadataDestroys: 1,
+      expectedTrackingDestroys: 1,
+      name: "pagehide registration",
+      configure({ failure, hostWindow }) {
+        const addEventListener = hostWindow.addEventListener.bind(hostWindow);
+        hostWindow.addEventListener = (type, listener) => {
+          addEventListener(type, listener);
+          if (type === "pagehide") {
+            throw failure;
+          }
+        };
+      },
+    },
+  ];
+
+  for (const stage of stages) {
+    await t.test(stage.name, async () => {
+      const failure = new Error(`${stage.name} failed`);
+      const hostWindow = new FakeEventTarget();
+      hostWindow.location = { search: "?file=ignored-by-injected-boot" };
+      const frame = new FakeEventTarget();
+      frame.hidden = true;
+      frame.src = "";
+      const errorPanel = { hidden: true };
+      const errorMessage = { textContent: "" };
+      const fileAccessInstructions = { hidden: true };
+      const warningPanel = { hidden: true };
+      const warningMessage = { textContent: "" };
+      const elements = new Map([
+        ["#pdfViewer", frame],
+        ["#viewerError", errorPanel],
+        ["#viewerErrorMessage", errorMessage],
+        ["#viewerFileAccessInstructions", fileAccessInstructions],
+        ["#viewerWarning", warningPanel],
+        ["#viewerWarningMessage", warningMessage],
+      ]);
+      const hostDocument = {
+        querySelector: (selector) => elements.get(selector),
+      };
+      let metadataDestroys = 0;
+      let trackingDestroys = 0;
+      let trackingHandoffs = 0;
+      const revoked = [];
+      const options = {
+        hostDocument,
+        hostWindow,
+        sendMessage() {},
+        async bootViewerOperation({ view }) {
+          view.showViewer(
+            new URL(
+              "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html?file=blob%3Atest",
+            ),
+          );
+          return { fileUrl: BOOK_URL, objectUrl: BLOB_URL };
+        },
+        createMetadataHydration() {
+          return {
+            destroy() {
+              metadataDestroys += 1;
+            },
+          };
+        },
+        createPositionTracking() {
+          return {
+            destroy() {
+              trackingDestroys += 1;
+            },
+            handoff() {
+              trackingHandoffs += 1;
+            },
+          };
+        },
+        revokeObjectUrl(objectUrl) {
+          revoked.push(objectUrl);
+        },
+      };
+      stage.configure({ failure, hostWindow, options });
+
+      if (stage.name === "position update client validation") {
+        await assert.rejects(() => startViewerApp(options), /sendMessage must be a function/);
+      } else {
+        await assert.rejects(() => startViewerApp(options), failure);
+      }
+
+      assert.equal(metadataDestroys, stage.expectedMetadataDestroys);
+      assert.equal(trackingDestroys, stage.expectedTrackingDestroys);
+      assert.deepEqual(revoked, [BLOB_URL]);
+      assert.equal(hostWindow.listenerCount("pagehide"), 0);
+      assert.equal(frame.hidden, true);
+      assert.equal(errorPanel.hidden, false);
+      assert.equal(errorMessage.textContent, startupErrorMessage);
+
+      hostWindow.dispatch("pagehide");
+      assert.equal(metadataDestroys, stage.expectedMetadataDestroys);
+      assert.equal(trackingDestroys, stage.expectedTrackingDestroys);
+      assert.equal(trackingHandoffs, 0);
+      assert.deepEqual(revoked, [BLOB_URL]);
+    });
+  }
+});
+
 test("production composition wires canonical boot, actual tracking, worker handoff, and teardown", async () => {
   const time = createFakeScheduler();
   const hostWindow = new FakeEventTarget();
@@ -1692,9 +3150,10 @@ test("production composition wires canonical boot, actual tracking, worker hando
   const workerCalls = [];
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePosition: async (fileUrl, position) => {
+    updatePendingPositionObservation: async () => "stale",
+    updatePositionObservation: async (fileUrl, position) => {
       workerCalls.push({ fileUrl, position });
-      return { ...canonicalRecord(), ...position };
+      return "updated";
     },
   });
   const bridge = createMessageBridge(handler);
@@ -1715,6 +3174,13 @@ test("production composition wires canonical boot, actual tracking, worker hando
     getBookOperation: async () => {
       getBookCalls += 1;
       return canonicalRecord();
+    },
+    getPositionTrackingStateOperation: async () => {
+      getBookCalls += 1;
+      return {
+        book: canonicalRecord(),
+        trackingGeneration: TEST_TRACKING_GENERATION,
+      };
     },
     bootViewerOperation: async (options) => {
       bootCalls.push(options);
@@ -1839,7 +3305,8 @@ test("actual tracking saves page 8 against stale total 7 without clobbering book
   });
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePosition: storage.updatePosition,
+    updatePendingPositionObservation: storage.updatePendingPositionObservation,
+    updatePositionObservation: storage.updatePositionObservation,
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
@@ -1856,6 +3323,6 @@ test("actual tracking saves page 8 against stale total 7 without clobbering book
     ...existing,
     currentPage: 8,
     scrollTop: 808,
-    lastReadAt: 1_800_000_000,
+    lastReadAt: Math.floor(OBSERVATION_START / 1_000),
   });
 });

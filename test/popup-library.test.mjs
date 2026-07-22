@@ -12,6 +12,14 @@ const BOOK_A_URL = "file:///Users/reader/Books/A.pdf";
 const BOOK_B_URL = "file:///Users/reader/Books/B.pdf";
 const TAB_ID = 7;
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function canonicalRecord(overrides = {}) {
   return {
     title: "Book title",
@@ -39,6 +47,9 @@ function createViewSpy() {
     },
     setRenameHandler() {},
     setUntrackHandler() {},
+    showFileAccessInstructions(details) {
+      calls.push(["file-access-instructions", details]);
+    },
     showIneligible() {
       calls.push(["ineligible"]);
     },
@@ -51,7 +62,11 @@ function createViewSpy() {
   };
 }
 
-function createHarness({ storage = {} } = {}) {
+function createHarness({
+  fileSchemeAccessAllowed = true,
+  storage = {},
+  view = createViewSpy(),
+} = {}) {
   const fake = createChromeExtensionFake({
     activeTabId: TAB_ID,
     storage,
@@ -61,10 +76,28 @@ function createHarness({ storage = {} } = {}) {
     storageArea: fake.chrome.storage.local,
     lockManager: fake.locks,
   });
-  const view = createViewSpy();
+  let fileAccessAllowed = fileSchemeAccessAllowed;
+  let fileSchemeAccessChecks = 0;
+  const permissionHolds = new Map();
   const app = createPopupApp({
     view,
-    isFileSchemeAccessAllowed: async () => true,
+    async isFileSchemeAccessAllowed() {
+      fileSchemeAccessChecks += 1;
+      const hold = permissionHolds.get(fileSchemeAccessChecks);
+      if (hold) {
+        permissionHolds.delete(fileSchemeAccessChecks);
+        hold.started.resolve();
+        const heldResult = await hold.released.promise;
+        if (heldResult instanceof Error) {
+          throw heldResult;
+        }
+        return heldResult;
+      }
+      if (fileAccessAllowed instanceof Error) {
+        throw fileAccessAllowed;
+      }
+      return fileAccessAllowed;
+    },
     queryActiveTab: (query) => fake.chrome.tabs.query(query),
     getTab: (tabId) => fake.chrome.tabs.get(tabId),
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
@@ -75,7 +108,22 @@ function createHarness({ storage = {} } = {}) {
     trackBook: books.trackBook,
     updateCustomTitle: books.updateCustomTitle,
   });
-  return { app, fake, view };
+  return {
+    app,
+    fake,
+    get fileSchemeAccessChecks() {
+      return fileSchemeAccessChecks;
+    },
+    holdFileSchemeAccessCheck(checkNumber) {
+      const hold = { released: deferred(), started: deferred() };
+      permissionHolds.set(checkNumber, hold);
+      return { started: hold.started.promise, release: hold.released.resolve };
+    },
+    setFileSchemeAccessAllowed(allowed) {
+      fileAccessAllowed = allowed;
+    },
+    view,
+  };
 }
 
 test("non-PDF tabs list every tracked book with title and reading progress", async () => {
@@ -121,6 +169,33 @@ test("non-PDF tabs list every tracked book with title and reading progress", asy
   ]);
 });
 
+test("library treats a stale-low total as unavailable", async () => {
+  const { elements, hostDocument } = createPopupDocumentFake();
+  const harness = createHarness({
+    storage: {
+      books: {
+        [BOOK_A_URL]: canonicalRecord({ currentPage: 12, totalPages: 7 }),
+      },
+    },
+    view: createPopupView({ hostDocument }),
+  });
+
+  await harness.app.start();
+
+  const [[button, progressRow]] = elements["#libraryList"].children.map((item) => item.children);
+  const [, summary] = button.children;
+  const [progress, progressLabel] = progressRow.children;
+  assert.equal(summary.textContent, "Page 12 of —");
+  assert.equal(button.attributes["aria-label"], "Open Book title, Page 12 of —");
+  assert.equal(progress.hidden, true);
+  assert.equal(progressLabel.textContent, "Progress unavailable");
+  assert.equal(
+    progressLabel.attributes["aria-label"],
+    "Reading progress for Book title: unavailable",
+  );
+  assert.equal(button.attributes["aria-describedby"], progressLabel.attributes.id);
+});
+
 test("clicking a library book opens it in the viewer on the captured active tab", async () => {
   const harness = createHarness({
     storage: { books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) } },
@@ -131,6 +206,13 @@ test("clicking a library book opens it in the viewer on the captured active tab"
 
   const expectedViewerUrl =
     "chrome-extension://abcdefghijklmnopabcdefghijklmnop/viewer.html?file=file%3A%2F%2F%2FUsers%2Freader%2FBooks%2FA.pdf";
+  assert.equal(harness.fileSchemeAccessChecks, 2);
+  assert.equal(
+    harness.fake.tabOperations.filter(
+      ({ method, phase }) => method === "get" && phase === "start",
+    ).length,
+    2,
+  );
   assert.equal(harness.fake.snapshotTab(TAB_ID).url, expectedViewerUrl);
   assert.deepEqual(
     harness.fake.tabOperations.filter(
@@ -160,6 +242,220 @@ test("clicking a library book opens it in the viewer on the captured active tab"
       status: "Opening Metadata A in the viewer…",
     },
   ]);
+});
+
+test("library navigation denied before opening shows actionable file access instructions", async () => {
+  const harness = createHarness({
+    storage: { books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) } },
+  });
+  await harness.app.start();
+  harness.setFileSchemeAccessAllowed(false);
+
+  await harness.view.openBook(BOOK_A_URL);
+
+  assert.equal(harness.fake.snapshotTab(TAB_ID).url, "https://example.test/");
+  assert.equal(
+    harness.fake.tabOperations.filter(
+      ({ method, phase }) => method === "update" && phase === "start",
+    ).length,
+    0,
+  );
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "file-access-instructions",
+    { filename: "Metadata A" },
+  ]);
+});
+
+test("library revalidates permission after deferred captured-tab validation", async () => {
+  const harness = createHarness({
+    storage: { books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) } },
+  });
+  await harness.app.start();
+  const heldTabRead = harness.fake.holdNext("get");
+
+  const opening = harness.view.openBook(BOOK_A_URL);
+  await heldTabRead.started;
+  harness.setFileSchemeAccessAllowed(false);
+  heldTabRead.release();
+  await opening;
+
+  assert.equal(harness.fileSchemeAccessChecks, 2);
+  assert.deepEqual(harness.fake.storageFake.snapshot(), {
+    books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) },
+  });
+  assert.equal(
+    harness.fake.storageFake.operations.filter(
+      ({ method, phase }) => method === "set" && phase === "start",
+    ).length,
+    0,
+  );
+  assert.equal(harness.fake.snapshotTab(TAB_ID).url, "https://example.test/");
+  assert.equal(
+    harness.fake.tabOperations.filter(
+      ({ method, phase }) => method === "update" && phase === "start",
+    ).length,
+    0,
+  );
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "file-access-instructions",
+    { filename: "Metadata A" },
+  ]);
+});
+
+test("library does not overwrite newer navigation during deferred tab validation", async () => {
+  const harness = createHarness({
+    storage: { books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) } },
+  });
+  await harness.app.start();
+  const heldTabRead = harness.fake.holdNext("get");
+
+  const opening = harness.view.openBook(BOOK_A_URL);
+  await heldTabRead.started;
+  harness.fake.setTabUrl(TAB_ID, "https://example.test/newer");
+  heldTabRead.release();
+  await opening;
+
+  assert.equal(harness.fileSchemeAccessChecks, 1);
+  assert.equal(harness.fake.snapshotTab(TAB_ID).url, "https://example.test/newer");
+  assert.equal(
+    harness.fake.tabOperations.filter(
+      ({ method, phase }) => method === "update" && phase === "start",
+    ).length,
+    0,
+  );
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "library",
+    {
+      books: [
+        {
+          fileUrl: BOOK_A_URL,
+          title: "Metadata A",
+          currentPage: 25,
+          totalPages: 100,
+          progressPercent: 25,
+        },
+      ],
+      error: "Metadata A could not be opened. Try again.",
+      status: "Unable to open book",
+    },
+  ]);
+});
+
+test("final captured-tab validation after permission preserves newer library navigation", async (t) => {
+  for (const { name, mutateTab, assertNavigationPreserved } of [
+    {
+      name: "committed navigation",
+      mutateTab: (fake) => fake.setTabUrl(TAB_ID, "https://example.test/newer"),
+      assertNavigationPreserved: (fake) =>
+        assert.equal(fake.snapshotTab(TAB_ID).url, "https://example.test/newer"),
+    },
+    {
+      name: "pending navigation",
+      mutateTab: (fake) => fake.setTabPendingUrl(TAB_ID, "https://example.test/newer"),
+      assertNavigationPreserved: (fake) =>
+        assert.equal(fake.snapshotTab(TAB_ID).pendingUrl, "https://example.test/newer"),
+    },
+  ]) {
+    await t.test(name, async () => {
+      const harness = createHarness({
+        storage: { books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) } },
+      });
+      await harness.app.start();
+      const heldPermissionCheck = harness.holdFileSchemeAccessCheck(2);
+
+      const opening = harness.view.openBook(BOOK_A_URL);
+      await heldPermissionCheck.started;
+      assert.equal(
+        harness.fake.tabOperations.filter(
+          ({ method, phase }) => method === "get" && phase === "start",
+        ).length,
+        1,
+      );
+      mutateTab(harness.fake);
+      heldPermissionCheck.release(true);
+      await opening;
+
+      assert.equal(
+        harness.fake.tabOperations.filter(
+          ({ method, phase }) => method === "get" && phase === "start",
+        ).length,
+        2,
+      );
+      assert.equal(
+        harness.fake.tabOperations.filter(
+          ({ method, phase }) => method === "update" && phase === "start",
+        ).length,
+        0,
+      );
+      assertNavigationPreserved(harness.fake);
+      assert.deepEqual(harness.view.calls.at(-1), [
+        "library",
+        {
+          books: [
+            {
+              fileUrl: BOOK_A_URL,
+              title: "Metadata A",
+              currentPage: 25,
+              totalPages: 100,
+              progressPercent: 25,
+            },
+          ],
+          error: "Metadata A could not be opened. Try again.",
+          status: "Unable to open book",
+        },
+      ]);
+    });
+  }
+});
+
+test("library permission-check failure after tab validation remains retryable", async () => {
+  const harness = createHarness({
+    storage: { books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) } },
+  });
+  await harness.app.start();
+  const heldTabRead = harness.fake.holdNext("get");
+
+  const opening = harness.view.openBook(BOOK_A_URL);
+  await heldTabRead.started;
+  harness.setFileSchemeAccessAllowed(new Error("permission check failed"));
+  heldTabRead.release();
+  await opening;
+
+  assert.equal(harness.fileSchemeAccessChecks, 2);
+  assert.equal(harness.fake.snapshotTab(TAB_ID).url, "https://example.test/");
+  assert.equal(
+    harness.fake.tabOperations.filter(
+      ({ method, phase }) => method === "update" && phase === "start",
+    ).length,
+    0,
+  );
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "library",
+    {
+      books: [
+        {
+          fileUrl: BOOK_A_URL,
+          title: "Metadata A",
+          currentPage: 25,
+          totalPages: 100,
+          progressPercent: 25,
+        },
+      ],
+      error: "Metadata A could not be opened. Try again.",
+      status: "Unable to open book",
+    },
+  ]);
+
+  harness.setFileSchemeAccessAllowed(true);
+  await harness.view.openBook(BOOK_A_URL);
+
+  assert.equal(
+    harness.fake.tabOperations.filter(
+      ({ method, phase }) => method === "update" && phase === "start",
+    ).length,
+    1,
+  );
+  assert.match(harness.fake.snapshotTab(TAB_ID).url, /^chrome-extension:/);
 });
 
 test("failed library navigation keeps the library visible and retryable", async () => {
@@ -193,7 +489,7 @@ test("failed library navigation keeps the library visible and retryable", async 
   assert.match(harness.fake.snapshotTab(TAB_ID).url, /^chrome-extension:/);
 });
 
-test("library view renders accessible book buttons and a progress bar for every book", async () => {
+test("library view renders labelled determinate progress and hides unavailable progress bars", async () => {
   const { elements, hostDocument } = createPopupDocumentFake();
   const view = createPopupView({ hostDocument });
   const opened = [];
@@ -233,9 +529,15 @@ test("library view renders accessible book buttons and a progress bar for every 
     'Open <img src=x onerror="alert(1)">, Page 25 of 100',
   );
   assert.equal(firstProgress.tagName, "PROGRESS");
+  assert.equal(firstProgress.hidden, false);
   assert.equal(firstProgress.max, 100);
   assert.equal(firstProgress.value, 25);
+  assert.equal(
+    firstProgress.attributes["aria-label"],
+    'Reading progress for <img src=x onerror="alert(1)">',
+  );
   assert.equal(firstProgressLabel.textContent, "25%");
+  assert.equal(firstProgress.attributes["aria-describedby"], firstProgressLabel.attributes.id);
   firstButton.click();
   assert.deepEqual(opened, [BOOK_A_URL]);
 
@@ -245,7 +547,13 @@ test("library view renders accessible book buttons and a progress bar for every 
   assert.equal(secondSummary.textContent, "Page 8 of —");
   assert.equal(secondButton.attributes["aria-label"], "Open Reader B, Page 8 of —");
   assert.equal(secondProgress.tagName, "PROGRESS");
+  assert.equal(secondProgress.hidden, true);
   assert.equal(secondProgressLabel.textContent, "Progress unavailable");
+  assert.equal(
+    secondProgressLabel.attributes["aria-label"],
+    "Reading progress for Reader B: unavailable",
+  );
+  assert.equal(secondButton.attributes["aria-describedby"], secondProgressLabel.attributes.id);
 
   const popupHtml = await readFile(new URL("../popup/popup.html", import.meta.url), "utf8");
   assert.match(popupHtml, /<section id="popupLibrary"[^>]+aria-labelledby="libraryHeading"[^>]+hidden>/);

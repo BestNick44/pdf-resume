@@ -2,6 +2,7 @@ import { samePosition, validPosition } from "../shared/position.mjs";
 
 const PDF_JS_RENDERING_FINISHED = 3;
 const PDF_JS_INITIAL_VIEW_TIMEOUT_MILLISECONDS = 10_000;
+const PDF_JS_TARGET_PAGE_TIMEOUT_MILLISECONDS = 10_000;
 const TRANSIENT_INTERACTION_IDLE_MILLISECONDS = 250;
 const TRANSIENT_INTERACTION_EVENTS = ["click", "keydown", "wheel"];
 const GESTURE_INTERACTION_EVENTS = [
@@ -27,6 +28,7 @@ function waitForTargetPage({
   pageNumber,
   pdfViewer,
   renderOutcomes,
+  scheduler,
   signal,
   navigate,
 }) {
@@ -37,12 +39,14 @@ function waitForTargetPage({
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timer;
 
     function finish(error) {
       if (settled) {
         return;
       }
       settled = true;
+      scheduler.clearTimeout(timer);
       eventBus.off("pagerendered", onPageRendered);
       signal.removeEventListener("abort", onAbort);
       if (error) {
@@ -70,10 +74,21 @@ function waitForTargetPage({
       return;
     }
 
-    navigate();
-    if (targetPage.renderingState === PDF_JS_RENDERING_FINISHED) {
-      const outcome = renderOutcomes.outcomeFor(targetPage);
-      finish(outcome?.pageNumber === pageNumber ? outcome.error : undefined);
+    timer = scheduler.setTimeout(
+      () =>
+        finish(
+          new Error(`PDF.js page ${pageNumber} did not finish rendering.`),
+        ),
+      PDF_JS_TARGET_PAGE_TIMEOUT_MILLISECONDS,
+    );
+    try {
+      navigate();
+      if (targetPage.renderingState === PDF_JS_RENDERING_FINISHED) {
+        const outcome = renderOutcomes.outcomeFor(targetPage);
+        finish(outcome?.pageNumber === pageNumber ? outcome.error : undefined);
+      }
+    } catch (error) {
+      finish(error);
     }
   });
 }
@@ -287,6 +302,7 @@ export function createPdfJsRestoreLifecycle({
   interactionTarget,
   pdfViewer,
   readPosition,
+  onGenuinePositionChange,
   scheduler = globalThis,
 } = {}) {
   if (
@@ -309,6 +325,12 @@ export function createPdfJsRestoreLifecycle({
   }
   if (typeof readPosition !== "function") {
     throw new TypeError("restore lifecycle must be able to read the live position");
+  }
+  if (
+    onGenuinePositionChange !== undefined &&
+    typeof onGenuinePositionChange !== "function"
+  ) {
+    throw new TypeError("restore lifecycle position observer must be a function");
   }
   if (
     !scheduler ||
@@ -363,17 +385,18 @@ export function createPdfJsRestoreLifecycle({
 
   function observePositionActivity() {
     if (
-      genuinePositionChange ||
       ignoredPositionChanges > 0 ||
       !intentActive() ||
       !positionBeforeInteraction
     ) {
       return;
     }
-    genuinePositionChange = !samePosition(
-      positionBeforeInteraction,
-      validPosition(readPosition()),
-    );
+    const position = validPosition(readPosition());
+    if (samePosition(positionBeforeInteraction, position)) {
+      return;
+    }
+    genuinePositionChange = true;
+    onGenuinePositionChange?.(position);
   }
 
   function onTransientInteraction(event) {
@@ -539,15 +562,20 @@ export async function restorePdfJsPosition({
       : Number.isInteger(fallbackPage) && fallbackPage > 0
         ? fallbackPage
         : 1;
-    const bounds = layoutBounds(container);
     const restoredPosition = {
       currentPage: pageNumber,
-      scrollTop: bounds
+      scrollTop: position.scrollTop,
+    };
+    const clampRestoredPosition = () => {
+      const bounds = layoutBounds(container);
+      restoredPosition.scrollTop = bounds
         ? Math.min(position.scrollTop, bounds.maximumScrollTop)
-        : position.scrollTop,
+        : position.scrollTop;
+      return bounds;
     };
 
     if (interaction.hasGenuineInteraction()) {
+      clampRestoredPosition();
       const handoffPosition = currentPosition(application, container, pagesCount);
       startTracking(restoredPosition, handoffPosition);
       return handoffPosition;
@@ -558,6 +586,7 @@ export async function restorePdfJsPosition({
       pageNumber,
       pdfViewer: application.pdfViewer,
       renderOutcomes,
+      scheduler,
       signal: active.signal,
       navigate() {
         const navigateToPage = () => {
@@ -579,6 +608,7 @@ export async function restorePdfJsPosition({
         return undefined;
       }
       const handoffPosition = currentPosition(application, container, pagesCount);
+      clampRestoredPosition();
       startTracking(restoredPosition, handoffPosition);
       return handoffPosition;
     }
@@ -588,10 +618,12 @@ export async function restorePdfJsPosition({
     }
     if (interaction.hasGenuineInteraction()) {
       const handoffPosition = currentPosition(application, container, pagesCount);
+      clampRestoredPosition();
       startTracking(restoredPosition, handoffPosition);
       return handoffPosition;
     }
 
+    const bounds = clampRestoredPosition();
     if (bounds) {
       const restoreScroll = () => {
         container.scrollTop = restoredPosition.scrollTop;

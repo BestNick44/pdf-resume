@@ -139,6 +139,21 @@ test("tracked local PDF and viewer popups preserve the dashboard while requestin
   }
 });
 
+test("tracked dashboard treats a stale-low total as unavailable", async () => {
+  const { elements, hostDocument } = createPopupDocumentFake();
+  const harness = createHarness({
+    book: canonicalRecord({ currentPage: 12, totalPages: 7 }),
+    view: createPopupView({ hostDocument }),
+  });
+
+  await harness.app.start();
+
+  assert.equal(elements["#pageSummary"].textContent, "Page 12 of —");
+  assert.equal(elements["#pagesRemaining"].textContent, "Page count unavailable");
+  assert.equal(elements["#progressBar"].hidden, true);
+  assert.equal(elements["#progressPercent"].textContent, "Progress unavailable");
+});
+
 test("tracked viewer tab shows its title and reading progress", async () => {
   const harness = createHarness({ book: canonicalRecord({ customTitle: "Reader name" }) });
 
@@ -181,32 +196,34 @@ test("renaming a tracked book durably saves and displays its custom title", asyn
   ]);
 });
 
-test("failed rename remains tracked and can be retried", async () => {
+test("failed rename keeps the entered title visible and retryable without retyping", async () => {
   const existing = canonicalRecord();
-  const harness = createHarness({ book: existing });
+  const { elements, hostDocument } = createPopupDocumentFake();
+  const harness = createHarness({
+    book: existing,
+    view: createPopupView({ hostDocument }),
+  });
   await harness.app.start();
   harness.fake.storageFake.failNext("set", new Error("quota exceeded"));
 
-  await harness.view.rename("Reader name");
+  elements["#customTitle"].value = "  Reader name  ";
+  assert.equal(elements["#renameForm"].submit(), true);
+  assert.equal(elements["#customTitle"].value, "  Reader name  ");
+  assert.equal(elements["#customTitle"].disabled, true);
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], existing);
-  assert.deepEqual(harness.view.calls.at(-1), [
-    "tracked",
-    {
-      title: "Metadata title",
-      customTitle: null,
-      currentPage: 45,
-      totalPages: 123,
-      pagesRemaining: 78,
-      progressPercent: 37,
-      error: "The title could not be saved. Try again.",
-      status: "Unable to save title",
-    },
-  ]);
+  assert.equal(elements["#popupStatus"].textContent, "Unable to save title");
+  assert.equal(elements["#popupError"].textContent, "The title could not be saved. Try again.");
+  assert.equal(elements["#customTitle"].value, "  Reader name  ");
+  assert.equal(elements["#customTitle"].disabled, false);
 
-  await harness.view.rename("Reader name");
+  assert.equal(elements["#renameForm"].submit(), true);
+  await new Promise((resolve) => setImmediate(resolve));
+
   assert.equal(harness.fake.storageFake.snapshot().books[BOOK_URL].customTitle, "Reader name");
-  assert.equal(harness.view.calls.at(-1)[1].status, "Title saved.");
+  assert.equal(elements["#popupStatus"].textContent, "Title saved.");
+  assert.equal(elements["#customTitle"].value, "Reader name");
 });
 
 test("rename after another context untracks the book never recreates it or claims success", async () => {

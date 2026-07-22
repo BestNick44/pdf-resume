@@ -36,12 +36,13 @@ export function createChromeExtensionFake({
     }
     const returnUndefined = undefinedResults.get(method)?.shift();
     const result = returnUndefined ? undefined : operation();
+    const returnValue = result === undefined ? undefined : structuredClone(result);
     if (hold?.after) {
       hold.started.resolve();
       await hold.released.promise;
     }
     tabOperations.push({ method, phase: "finish", ...structuredClone(details) });
-    return result === undefined ? undefined : structuredClone(result);
+    return returnValue;
   }
 
   const chrome = {

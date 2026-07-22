@@ -11,6 +11,14 @@ import { createPopupDocumentFake } from "./support/popup-dom-fake.mjs";
 const BOOK_URL = "file:///Users/reader/Books/A%20Book.pdf";
 const TAB_ID = 7;
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function canonicalRecord(overrides = {}) {
   return {
     title: "A Book",
@@ -22,6 +30,17 @@ function canonicalRecord(overrides = {}) {
     lastReadAt: 1_800_000_000,
     ...overrides,
   };
+}
+
+function assertTrackedStorage(snapshot) {
+  assert.deepEqual(snapshot.books, { [BOOK_URL]: canonicalRecord() });
+  assert.equal(snapshot.positionOrder[BOOK_URL].version, 2);
+  assert.match(
+    snapshot.positionOrder[BOOK_URL].generation,
+    /^[0-9a-f]{32}$/,
+  );
+  assert.equal(snapshot.positionOrder[BOOK_URL].winner, null);
+  assert.deepEqual(snapshot.positionOrder[BOOK_URL].viewers, {});
 }
 
 function createViewSpy() {
@@ -94,12 +113,27 @@ function createHarness({
   });
   const view = createViewSpy();
   let fileSchemeAccessChecks = 0;
+  let fileAccessAllowed = fileSchemeAccessAllowed;
+  const permissionHolds = new Map();
   let trackCalls = 0;
   const app = createPopupApp({
     view,
     async isFileSchemeAccessAllowed() {
       fileSchemeAccessChecks += 1;
-      return fileSchemeAccessAllowed;
+      const hold = permissionHolds.get(fileSchemeAccessChecks);
+      if (hold) {
+        permissionHolds.delete(fileSchemeAccessChecks);
+        hold.started.resolve();
+        const heldResult = await hold.released.promise;
+        if (heldResult instanceof Error) {
+          throw heldResult;
+        }
+        return heldResult;
+      }
+      if (fileAccessAllowed instanceof Error) {
+        throw fileAccessAllowed;
+      }
+      return fileAccessAllowed;
     },
     queryActiveTab: (query) => fake.chrome.tabs.query(query),
     getTab: (tabId) => fake.chrome.tabs.get(tabId),
@@ -123,6 +157,14 @@ function createHarness({
     },
     get trackCalls() {
       return trackCalls;
+    },
+    holdFileSchemeAccessCheck(checkNumber) {
+      const hold = { released: deferred(), started: deferred() };
+      permissionHolds.set(checkNumber, hold);
+      return { started: hold.started.promise, release: hold.released.resolve };
+    },
+    setFileSchemeAccessAllowed(allowed) {
+      fileAccessAllowed = allowed;
     },
     view,
   };
@@ -294,6 +336,111 @@ test("already tracked PDFs request file access without writing or navigating", a
   assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], existing);
 });
 
+test("activation denied after initial rendering shows file access instructions without persistence or navigation", async () => {
+  const harness = createHarness();
+  await harness.app.start();
+  harness.setFileSchemeAccessAllowed(false);
+
+  await harness.view.activate();
+
+  assert.equal(harness.fileSchemeAccessChecks, 2);
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+  assert.deepEqual(harness.fake.storageFake.snapshot(), {});
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "file-access-instructions",
+    { filename: "A Book" },
+  ]);
+});
+
+test("activation revalidates permission after deferred same-tab validation", async () => {
+  const harness = createHarness();
+  await harness.app.start();
+  const heldTabRead = harness.fake.holdNext("get");
+
+  const activation = harness.view.activate();
+  await heldTabRead.started;
+  harness.setFileSchemeAccessAllowed(false);
+  heldTabRead.release();
+  await activation;
+
+  assert.equal(harness.fileSchemeAccessChecks, 3);
+  assert.equal(startedTabOperations(harness.fake, "get").length, 1);
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+  assert.deepEqual(harness.fake.storageFake.snapshot(), {});
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "file-access-instructions",
+    { filename: "A Book" },
+  ]);
+});
+
+test("activation permission-check failure uses the retryable tracking error state", async () => {
+  const harness = createHarness();
+  await harness.app.start();
+  harness.setFileSchemeAccessAllowed(new Error("permission check failed"));
+
+  await harness.view.activate();
+
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "error",
+    {
+      filename: "A Book",
+      actionLabel: "Track this book",
+      message: "This book could not be tracked. No changes were made. Try again.",
+      persisted: false,
+    },
+  ]);
+});
+
+test("final same-tab validation after permission prevents tracking newer navigation", async (t) => {
+  for (const { name, mutateTab, assertNavigationPreserved } of [
+    {
+      name: "committed navigation",
+      mutateTab: (fake) => fake.setTabUrl(TAB_ID, "file:///Users/reader/Books/Other.pdf"),
+      assertNavigationPreserved: (fake) =>
+        assert.equal(fake.snapshotTab(TAB_ID).url, "file:///Users/reader/Books/Other.pdf"),
+    },
+    {
+      name: "pending navigation",
+      mutateTab: (fake) => fake.setTabPendingUrl(TAB_ID, "https://example.test/Other.pdf"),
+      assertNavigationPreserved: (fake) =>
+        assert.equal(fake.snapshotTab(TAB_ID).pendingUrl, "https://example.test/Other.pdf"),
+    },
+  ]) {
+    await t.test(name, async () => {
+      const harness = createHarness();
+      await harness.app.start();
+      const heldPermissionCheck = harness.holdFileSchemeAccessCheck(3);
+
+      const activation = harness.view.activate();
+      await heldPermissionCheck.started;
+      assert.equal(startedTabOperations(harness.fake, "get").length, 1);
+      mutateTab(harness.fake);
+      heldPermissionCheck.release(true);
+      await activation;
+
+      assert.equal(startedTabOperations(harness.fake, "get").length, 2);
+      assert.equal(harness.trackCalls, 0);
+      assert.equal(startedStorageOperations(harness.fake, "set").length, 0);
+      assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+      assert.deepEqual(harness.fake.storageFake.snapshot(), {});
+      assertNavigationPreserved(harness.fake);
+      assert.deepEqual(harness.view.calls.at(-1), [
+        "error",
+        {
+          filename: "A Book",
+          actionLabel: "Track this book",
+          message: "The original tab no longer shows this local PDF. No book was tracked.",
+          persisted: false,
+        },
+      ]);
+    });
+  }
+});
+
 test("activation durably creates the canonical record before redirecting that exact tab", async () => {
   const harness = createHarness();
   await harness.app.start();
@@ -307,12 +454,10 @@ test("activation durably creates the canonical record before redirecting that ex
   heldWrite.release();
   await activation;
 
-  assert.deepEqual(harness.fake.storageFake.snapshot(), {
-    books: { [BOOK_URL]: canonicalRecord() },
-  });
+  assertTrackedStorage(harness.fake.storageFake.snapshot());
   const expectedViewerUrl =
     "chrome-extension://abcdefghijklmnopabcdefghijklmnop/viewer.html?file=file%3A%2F%2F%2FUsers%2Freader%2FBooks%2FA%2520Book.pdf";
-  assert.equal(startedTabOperations(harness.fake, "get").length, 2);
+  assert.equal(startedTabOperations(harness.fake, "get").length, 3);
   assert.deepEqual(startedTabOperations(harness.fake, "update"), [
     {
       method: "update",
@@ -326,6 +471,110 @@ test("activation durably creates the canonical record before redirecting that ex
     "success",
     { filename: "A Book", message: "Book tracked. Opening the viewer…" },
   ]);
+});
+
+test("permission revoked during persistence preserves the durable record without redirecting", async () => {
+  const harness = createHarness();
+  await harness.app.start();
+  const heldWrite = harness.fake.storageFake.holdNext("set");
+
+  const activation = harness.view.activate();
+  await heldWrite.started;
+  harness.setFileSchemeAccessAllowed(false);
+  heldWrite.release();
+  await activation;
+
+  assert.equal(harness.fileSchemeAccessChecks, 4);
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
+  assert.equal(startedTabOperations(harness.fake, "get").length, 2);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+  assert.equal(harness.fake.snapshotTab(TAB_ID).url, BOOK_URL);
+  assertTrackedStorage(harness.fake.storageFake.snapshot());
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "file-access-instructions",
+    { filename: "A Book" },
+  ]);
+});
+
+test("permission-check failure after persistence keeps the record and retry action", async () => {
+  const harness = createHarness();
+  await harness.app.start();
+  const heldWrite = harness.fake.storageFake.holdNext("set");
+
+  const activation = harness.view.activate();
+  await heldWrite.started;
+  harness.setFileSchemeAccessAllowed(new Error("permission check failed"));
+  heldWrite.release();
+  await activation;
+
+  assertTrackedStorage(harness.fake.storageFake.snapshot());
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "error",
+    {
+      filename: "A Book",
+      actionLabel: "Retry opening viewer",
+      message:
+        "This book is tracked, but the original PDF tab could not be opened in the viewer. Return that tab to the same PDF and retry.",
+      persisted: true,
+    },
+  ]);
+
+  harness.setFileSchemeAccessAllowed(true);
+  await harness.view.activate();
+
+  assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
+  assert.equal(startedTabOperations(harness.fake, "update").length, 1);
+  assert.equal(harness.view.calls.at(-1)[0], "success");
+});
+
+test("final same-tab validation after permission preserves newer post-persistence navigation", async (t) => {
+  for (const { name, mutateTab, assertNavigationPreserved } of [
+    {
+      name: "committed navigation",
+      mutateTab: (fake) => fake.setTabUrl(TAB_ID, "file:///Users/reader/Books/Other.pdf"),
+      assertNavigationPreserved: (fake) =>
+        assert.equal(fake.snapshotTab(TAB_ID).url, "file:///Users/reader/Books/Other.pdf"),
+    },
+    {
+      name: "pending navigation",
+      mutateTab: (fake) => fake.setTabPendingUrl(TAB_ID, "https://example.test/Other.pdf"),
+      assertNavigationPreserved: (fake) =>
+        assert.equal(fake.snapshotTab(TAB_ID).pendingUrl, "https://example.test/Other.pdf"),
+    },
+  ]) {
+    await t.test(name, async () => {
+      const harness = createHarness();
+      await harness.app.start();
+      const heldPermissionCheck = harness.holdFileSchemeAccessCheck(4);
+
+      const activation = harness.view.activate();
+      await heldPermissionCheck.started;
+      assert.equal(startedTabOperations(harness.fake, "get").length, 2);
+      assertTrackedStorage(harness.fake.storageFake.snapshot());
+      mutateTab(harness.fake);
+      heldPermissionCheck.release(true);
+      await activation;
+
+      assert.equal(startedTabOperations(harness.fake, "get").length, 3);
+      assert.equal(harness.trackCalls, 1);
+      assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
+      assert.equal(startedTabOperations(harness.fake, "update").length, 0);
+      assertTrackedStorage(harness.fake.storageFake.snapshot());
+      assertNavigationPreserved(harness.fake);
+      assert.deepEqual(harness.view.calls.at(-1), [
+        "error",
+        {
+          filename: "A Book",
+          actionLabel: "Retry opening viewer",
+          message:
+            "This book is tracked, but the original PDF tab could not be opened in the viewer. Return that tab to the same PDF and retry.",
+          persisted: true,
+        },
+      ]);
+    });
+  }
 });
 
 test("same-tab revalidation rejects committed or pending navigation before any write", async (t) => {
@@ -411,7 +660,7 @@ test("post-persistence revalidation preserves the record without overwriting new
 
       assert.deepEqual(harness.fake.storageFake.snapshot().books[BOOK_URL], canonicalRecord());
       assert.equal(startedStorageOperations(harness.fake, "set").length, 1);
-      assert.equal(startedTabOperations(harness.fake, "get").length, 2);
+      assert.equal(startedTabOperations(harness.fake, "get").length, 3);
       assert.equal(startedTabOperations(harness.fake, "update").length, 0);
       assert.deepEqual(harness.view.calls.at(-1), [
         "error",

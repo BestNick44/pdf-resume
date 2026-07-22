@@ -126,7 +126,10 @@ function createRestoreHarness({
     return promise;
   }
 
-  async function render(pageNumber) {
+  async function render(pageNumber, geometry) {
+    if (geometry) {
+      Object.assign(container, geometry);
+    }
     pageViews[pageNumber - 1].renderingState = 3;
     eventBus.dispatch("pagerendered", {
       pageNumber,
@@ -179,6 +182,7 @@ test("tracked position restores the exact canonical container offset before trac
 
   await harness.render(7);
   assert.equal(harness.container.scrollTop, 6_000, "render alone is not layout readiness");
+  assert.equal(harness.time.pendingCount(), 1, "only the next layout turn remains");
   await harness.advanceLayoutTurn();
   assert.equal(harness.container.scrollTop, 2_345.5);
   assert.deepEqual(harness.starts, [], "tracking waits for the restored scroll to settle");
@@ -188,6 +192,41 @@ test("tracked position restores the exact canonical container offset before trac
   assert.deepEqual(harness.starts, [{ currentPage: 7, scrollTop: 2_345.5 }]);
   assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
   assert.equal(harness.eventBus.listenerCount("pagesdestroy"), 0);
+  assert.equal(harness.time.pendingCount(), 0);
+});
+
+test("saved offsets clamp against target-page geometry after rendering", async (t) => {
+  await t.test("layout growth preserves a newly valid offset", async () => {
+    const harness = createRestoreHarness({ clientHeight: 600, scrollHeight: 2_000 });
+    const restored = harness.start({ currentPage: 3, scrollTop: 2_500 });
+    await drainMicrotasks();
+    await harness.advanceLayoutTurn();
+
+    await harness.render(3, { clientHeight: 500, scrollHeight: 4_000 });
+    await harness.advanceLayoutTurn();
+    assert.equal(harness.container.scrollTop, 2_500);
+    await harness.advanceLayoutTurn();
+    await restored;
+
+    assert.deepEqual(harness.baselines, [{ currentPage: 3, scrollTop: 2_500 }]);
+    assert.deepEqual(harness.starts, [{ currentPage: 3, scrollTop: 2_500 }]);
+  });
+
+  await t.test("layout shrinkage clamps an offset to the new maximum", async () => {
+    const harness = createRestoreHarness({ clientHeight: 500, scrollHeight: 5_000 });
+    const restored = harness.start({ currentPage: 3, scrollTop: 3_500 });
+    await drainMicrotasks();
+    await harness.advanceLayoutTurn();
+
+    await harness.render(3, { clientHeight: 600, scrollHeight: 2_000 });
+    await harness.advanceLayoutTurn();
+    assert.equal(harness.container.scrollTop, 1_400);
+    await harness.advanceLayoutTurn();
+    await restored;
+
+    assert.deepEqual(harness.baselines, [{ currentPage: 3, scrollTop: 1_400 }]);
+    assert.deepEqual(harness.starts, [{ currentPage: 3, scrollTop: 1_400 }]);
+  });
 });
 
 test("late PDF.js initial-view changes finish before app-owned restore navigation", async () => {
@@ -354,6 +393,57 @@ test("a handoff-boundary interaction is captured by the tracker exactly once", a
   assert.deepEqual(harness.starts, [{ currentPage: 5, scrollTop: 2_050 }]);
 });
 
+test("target-page readiness rejects within a bounded time when rendering never settles", async () => {
+  const harness = createRestoreHarness();
+  const restored = harness.start({ currentPage: 8, scrollTop: 800 });
+  let settled = false;
+  restored.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  const rejection = assert.rejects(
+    restored,
+    /PDF\.js page 8 did not finish rendering\./,
+  );
+  await drainMicrotasks();
+  await harness.advanceLayoutTurn();
+
+  assert.equal(harness.eventBus.listenerCount("pagerendered"), 1);
+  assert.equal(harness.time.pendingCount(), 1);
+  harness.time.advanceBy(9_999);
+  await drainMicrotasks();
+  assert.equal(settled, false);
+  assert.deepEqual(harness.starts, []);
+
+  harness.time.advanceBy(1);
+  await rejection;
+  assert.equal(settled, true);
+  assert.deepEqual(harness.starts, []);
+  assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
+  assert.equal(harness.eventBus.listenerCount("pagesdestroy"), 0);
+  assert.equal(harness.time.pendingCount(), 0);
+});
+
+test("a synchronously finished target page cancels target readiness cleanup", async () => {
+  const harness = createRestoreHarness({ renderedPages: [4] });
+  const restored = harness.start({ currentPage: 4, scrollTop: 400 });
+  await drainMicrotasks();
+  await harness.advanceLayoutTurn();
+
+  assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
+  assert.equal(harness.time.pendingCount(), 1, "only the next layout turn remains");
+  await harness.advanceLayoutTurn();
+  await harness.advanceLayoutTurn();
+  await restored;
+
+  assert.deepEqual(harness.starts, [{ currentPage: 4, scrollTop: 400 }]);
+  assert.equal(harness.time.pendingCount(), 0);
+});
+
 test("pagerendered must come from the target page and report a successful render", async () => {
   const harness = createRestoreHarness();
   const restored = harness.start({ currentPage: 8, scrollTop: 800 });
@@ -366,6 +456,7 @@ test("pagerendered must come from the target page and report a successful render
   });
   await drainMicrotasks();
   assert.deepEqual(harness.starts, [], "an unrelated source cannot satisfy readiness");
+  assert.equal(harness.time.pendingCount(), 1);
 
   const renderError = new Error("canvas render failed");
   harness.eventBus.dispatch("pagerendered", {
@@ -376,6 +467,7 @@ test("pagerendered must come from the target page and report a successful render
   await assert.rejects(restored, (error) => error === renderError);
   assert.deepEqual(harness.starts, []);
   assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
+  assert.equal(harness.time.pendingCount(), 0);
 });
 
 test("document replacement cancels readiness waits and removes stale listeners", async () => {
@@ -384,6 +476,7 @@ test("document replacement cancels readiness waits and removes stale listeners",
   await drainMicrotasks();
   await harness.advanceLayoutTurn();
   assert.equal(harness.eventBus.listenerCount("pagerendered"), 1);
+  assert.equal(harness.time.pendingCount(), 1);
 
   harness.application.pdfDocument = { id: "replacement", numPages: 2 };
   harness.eventBus.dispatch("pagesdestroy", { source: harness.application.pdfViewer });
@@ -391,12 +484,17 @@ test("document replacement cancels readiness waits and removes stale listeners",
   assert.deepEqual(harness.starts, []);
   assert.equal(harness.eventBus.listenerCount("pagerendered"), 0);
   assert.equal(harness.eventBus.listenerCount("pagesdestroy"), 0);
+  assert.equal(harness.time.pendingCount(), 0);
 });
 
 test("explicit teardown cancels a pending restore without arming tracking", async () => {
   const harness = createRestoreHarness();
   const restored = harness.start({ currentPage: 9, scrollTop: 900 });
   await drainMicrotasks();
+  await harness.advanceLayoutTurn();
+  assert.equal(harness.eventBus.listenerCount("pagerendered"), 1);
+  assert.equal(harness.time.pendingCount(), 1);
+
   harness.controller.abort();
 
   assert.equal(await restored, undefined);

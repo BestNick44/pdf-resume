@@ -27,7 +27,7 @@ Bundle Mozilla's PDF.js viewer inside the extension. Tracking is **opt-in per fi
 - Untracked PDFs are never touched.
 
 ### 3. Position tracking & restore
-- Viewer saves current page number + scroll position to `chrome.storage.local`, debounced (~1s) on scroll/page change, and on tab close (`visibilitychange`/`pagehide`).
+- Viewer saves current page number + scroll position to `chrome.storage.local`, debounced (~1s) on scroll/page change, and on tab close (`visibilitychange`/`pagehide`). A final genuine snapshot captured while viewer registration is in flight may write only after that same viewer ID is durably registered in the current tracking generation.
 - On open, viewer restores the saved position after the document loads.
 
 ### 4. Book metadata
@@ -52,11 +52,28 @@ Bundle Mozilla's PDF.js viewer inside the extension. Tracking is **opt-in per fi
       "addedAt": 1700000000,
       "lastReadAt": 1700000000
     }
+  },
+  "positionOrder": {
+    "<file:// URL>": {
+      "version": 2,
+      "generation": "128-bit lowercase hexadecimal string",
+      "winner": {
+        "effectiveTime": 1700000000123,
+        "viewerId": "128-bit lowercase hexadecimal string",
+        "sequence": 42
+      },
+      "viewers": {
+        "<viewer ID>": {
+          "effectiveTime": 1700000000123,
+          "sequence": 42
+        }
+      }
+    }
   }
 }
 ```
 
-Keyed by full `file://` URL (v1 accepts breakage on move/rename; "Untrack + re-track" is the recovery path).
+Both maps are keyed by full `file://` URL (v1 accepts breakage on move/rename; "Untrack + re-track" is the recovery path). `positionOrder` is versioned app-owned metadata containing a tracking-lifetime generation, bounded per-viewer high-water marks, and a transitive winner key. It does not add fields to the authoritative seven-field book record. See [`docs/storage.md`](docs/storage.md) for exact validation, migration, reset, growth, and ordering rules.
 
 ## Architecture
 

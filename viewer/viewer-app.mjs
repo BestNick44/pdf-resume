@@ -1,4 +1,8 @@
-import { getBook, hydrateMetadata } from "../storage/books.mjs";
+import {
+  getBook,
+  getPositionTrackingState,
+  hydrateMetadata,
+} from "../storage/books.mjs";
 import { createPositionUpdateClient } from "../shared/position-update-messaging.mjs";
 import { createPdfJsMetadataHydration } from "./pdfjs-metadata-hydration.mjs";
 import { createPdfJsPositionTracking } from "./pdfjs-position-tracking.mjs";
@@ -9,6 +13,8 @@ const RESTORE_WARNING =
   "The saved reading position could not be restored. You can keep reading this PDF.";
 const METADATA_WARNING =
   "The book title and page count could not be saved. You can keep reading this PDF.";
+const STARTUP_ERROR =
+  "The PDF viewer could not be initialized. Reload this page to try again.";
 
 export async function startViewerApp({
   hostDocument = globalThis.document,
@@ -20,6 +26,7 @@ export async function startViewerApp({
     globalThis.chrome.extension.isAllowedFileSchemeAccess(),
   sendMessage = (message) => globalThis.chrome.runtime.sendMessage(message),
   getBookOperation = getBook,
+  getPositionTrackingStateOperation = getPositionTrackingState,
   hydrateMetadataOperation = hydrateMetadata,
   bootViewerOperation = bootViewer,
   createMetadataHydration = createPdfJsMetadataHydration,
@@ -52,30 +59,9 @@ export async function startViewerApp({
     return undefined;
   }
 
-  const positionUpdates = createPositionUpdateClient({ sendMessage });
-  const metadataHydration = createMetadataHydration({
-    fileUrl: viewer.fileUrl,
-    frame,
-    getBook: getBookOperation,
-    hydrateMetadata: hydrateMetadataOperation,
-    reportError(error) {
-      view.showWarning(METADATA_WARNING, error);
-    },
-    scheduler: metadataHydrationScheduler,
-  });
-  const positionTracking = createPositionTracking({
-    fileUrl: viewer.fileUrl,
-    frame,
-    hostDocument,
-    clock: positionTrackingClock,
-    getBook: getBookOperation,
-    updatePosition: positionUpdates.updatePosition,
-    handoffPosition: positionUpdates.handoffPosition,
-    reportError(error) {
-      view.showWarning(RESTORE_WARNING, error);
-    },
-    scheduler: positionTrackingScheduler,
-  });
+  let metadataHydration;
+  let positionTracking;
+  let pageHideRegistrationAttempted = false;
   let destroyed = false;
 
   function destroy() {
@@ -83,10 +69,21 @@ export async function startViewerApp({
       return;
     }
     destroyed = true;
-    hostWindow.removeEventListener("pagehide", onPageHide);
-    metadataHydration.destroy();
-    positionTracking.destroy();
-    revokeObjectUrl(viewer.objectUrl);
+    try {
+      if (pageHideRegistrationAttempted) {
+        hostWindow.removeEventListener("pagehide", onPageHide);
+      }
+    } finally {
+      try {
+        metadataHydration?.destroy();
+      } finally {
+        try {
+          positionTracking?.destroy();
+        } finally {
+          revokeObjectUrl(viewer.objectUrl);
+        }
+      }
+    }
   }
 
   function onPageHide() {
@@ -94,6 +91,42 @@ export async function startViewerApp({
     destroy();
   }
 
-  hostWindow.addEventListener("pagehide", onPageHide);
+  try {
+    const positionUpdates = createPositionUpdateClient({ sendMessage });
+    metadataHydration = createMetadataHydration({
+      fileUrl: viewer.fileUrl,
+      frame,
+      getBook: getBookOperation,
+      hydrateMetadata: hydrateMetadataOperation,
+      reportError(error) {
+        view.showWarning(METADATA_WARNING, error);
+      },
+      scheduler: metadataHydrationScheduler,
+    });
+    positionTracking = createPositionTracking({
+      fileUrl: viewer.fileUrl,
+      frame,
+      hostDocument,
+      clock: positionTrackingClock,
+      getPositionTrackingState: getPositionTrackingStateOperation,
+      updatePosition: positionUpdates.updatePosition,
+      handoffPendingPosition: positionUpdates.handoffPendingPosition,
+      handoffPosition: positionUpdates.handoffPosition,
+      reportError(error) {
+        view.showWarning(RESTORE_WARNING, error);
+      },
+      scheduler: positionTrackingScheduler,
+    });
+    pageHideRegistrationAttempted = true;
+    hostWindow.addEventListener("pagehide", onPageHide);
+  } catch (error) {
+    try {
+      destroy();
+    } finally {
+      view.showError(STARTUP_ERROR);
+    }
+    throw error;
+  }
+
   return Object.freeze({ destroy, metadataHydration, positionTracking, viewer });
 }

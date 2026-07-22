@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, readFile, readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
+import {
+  assertRegularFile,
+  discoverAppHtmlFiles,
+  discoverHtmlResourceReferences,
+  validateStaticResourceGraph,
+} from "../scripts/project-discovery.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -31,8 +37,8 @@ function resolveExtensionPath(relativePath) {
   return resolvedPath;
 }
 
-async function assertFileExists(relativePath) {
-  await access(resolveExtensionPath(relativePath));
+async function assertPackagedFile(relativePath) {
+  await assertRegularFile(resolveExtensionPath(relativePath), relativePath);
 }
 
 async function relativeFiles(directoryPath) {
@@ -101,11 +107,19 @@ test("manifest declares the milestone-one MV3 contract", async () => {
   });
 });
 
-test("every manifest entry point is a packaged file", async () => {
+test("package configuration treats JavaScript extension entries as ESM", async () => {
+  const packageJson = JSON.parse(
+    await readFile(path.join(projectRoot, "package.json"), "utf8"),
+  );
+
+  assert.equal(packageJson.type, "module");
+});
+
+test("every manifest entry point is a packaged regular file", async () => {
   const manifest = await readManifest();
 
-  await assertFileExists(manifest.background.service_worker);
-  await assertFileExists(manifest.action.default_popup);
+  await assertPackagedFile(manifest.background.service_worker);
+  await assertPackagedFile(manifest.action.default_popup);
 });
 
 test("popup shell exposes accessible opt-in, pending, and error surfaces", async () => {
@@ -128,8 +142,7 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   const manifest = await readManifest();
   const popupPath = resolveExtensionPath(manifest.action.default_popup);
   const popup = await readFile(popupPath, "utf8");
-  const resourcePattern = /<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"[^>]*>/gi;
-  const resources = [...popup.matchAll(resourcePattern)].map((match) => match[1]);
+  const resources = discoverHtmlResourceReferences(popup);
 
   assert.deepEqual(manifest.content_security_policy, expectedExtensionCsp);
   assert.equal(resources.length > 0, true, "popup should load at least one local asset");
@@ -143,7 +156,7 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
     assert.doesNotMatch(resource, /^[a-z][a-z\d+.-]*:/i);
     const resourcePath = path.resolve(path.dirname(popupPath), resource);
     assert.equal(resourcePath.startsWith(`${projectRoot}${path.sep}`), true);
-    await access(resourcePath);
+    await assertRegularFile(resourcePath, resource);
   }
 });
 
@@ -158,12 +171,18 @@ test("background entry registers navigation and private ordered position-update 
     worker,
     /import \{ createPositionUpdateMessageHandler \} from "\.\/shared\/position-update-messaging\.mjs";/,
   );
-  assert.match(worker, /import \{ getBook, updatePosition \} from "\.\/storage\/books\.mjs";/);
+  assert.match(
+    worker,
+    /import \{\s+getBook,\s+updatePendingPositionObservation,\s+updatePositionObservation,\s+\} from "\.\/storage\/books\.mjs";/,
+  );
   assert.match(worker, /runtime\.onMessage\.addListener/);
   assert.match(worker, /onBeforeNavigate\.addListener/);
-  assert.match(worker, /createPositionUpdateMessageHandler\(\{ extensionId: runtime\.id, updatePosition \}\)/);
-  await assertFileExists("shared/position-update-messaging.mjs");
-  await assertFileExists("storage/books.mjs");
+  assert.match(
+    worker,
+    /createPositionUpdateMessageHandler\(\{[\s\S]*updatePendingPositionObservation,[\s\S]*updatePositionObservation,[\s\S]*\}\)/,
+  );
+  await assertPackagedFile("shared/position-update-messaging.mjs");
+  await assertPackagedFile("storage/books.mjs");
 });
 
 test("popup and viewer entry points load their app-owned modules", async () => {
@@ -186,13 +205,13 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   assert.match(popupEntry, /extension\.isAllowedFileSchemeAccess\(\)/);
   assert.match(popupEntry, /runtime\.getURL\(path\)/);
   assert.match(popupEntry, /\blistBooks\b/);
-  await assertFileExists("popup/popup-app.mjs");
-  await assertFileExists("popup/popup-view.mjs");
+  await assertPackagedFile("popup/popup-app.mjs");
+  await assertPackagedFile("popup/popup-view.mjs");
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
   assert.match(viewerEntry, /^import \{ startViewerApp \} from "\.\/viewer-app\.mjs";/);
   assert.match(
     viewerApp,
-    /import \{ getBook, hydrateMetadata \} from "\.\.\/storage\/books\.mjs";/,
+    /import \{\s+getBook,\s+getPositionTrackingState,\s+hydrateMetadata,\s+\} from "\.\.\/storage\/books\.mjs";/,
   );
   assert.match(
     viewerApp,
@@ -205,6 +224,14 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   assert.match(viewerApp, /chrome\.extension\.isAllowedFileSchemeAccess\(\)/);
   assert.match(viewerApp, /createMetadataHydration\(\{/);
   assert.match(viewerApp, /createPositionTracking\(\{/);
+  assert.match(
+    viewerApp,
+    /getPositionTrackingState: getPositionTrackingStateOperation/,
+  );
+  assert.match(
+    viewerApp,
+    /handoffPendingPosition: positionUpdates\.handoffPendingPosition/,
+  );
   assert.match(viewerApp, /handoffPosition: positionUpdates\.handoffPosition/);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-entry.mjs")]);
@@ -270,6 +297,7 @@ test("shared storage module exposes its API without resolving extension globals 
   assert.deepEqual(
     [
       "getBook",
+      "getPositionTrackingState",
       "hydrateMetadata",
       "trackBook",
       "upsertBook",
@@ -277,6 +305,8 @@ test("shared storage module exposes its API without resolving extension globals 
       "removeBook",
       "listBooks",
       "updatePosition",
+      "updatePendingPositionObservation",
+      "updatePositionObservation",
     ].filter((operation) => typeof storageModule[operation] !== "function"),
     [],
   );
@@ -669,7 +699,7 @@ test("PDF.js viewer runtime, controls, and complete supporting assets are packag
     "viewer/pdfjs/web/wasm/qcms_bg.wasm",
   ];
   for (const file of requiredFiles) {
-    await assertFileExists(file);
+    await assertPackagedFile(file);
   }
 
   const vendorWebRoot = resolveExtensionPath("viewer/pdfjs/web");
@@ -727,46 +757,32 @@ test("PDF.js runtime and worker resources resolve through exact packaged paths",
   assert.match(vendorRuntime, /wasmUrl:\s*\{\s*value: "\.\.\/web\/wasm\/"/);
 });
 
-test("viewer resources stay packaged and MV3 CSP permits only required local loading", async () => {
+test("app entry points have a complete packaged local static resource graph", async () => {
   const manifest = await readManifest();
-  const appFiles = [
-    "viewer.html",
-    "viewer/viewer.css",
-    "viewer/viewer-entry.mjs",
-    "viewer/viewer-app.mjs",
-    "shared/book-title.mjs",
-    "viewer/pdfjs-initialization.mjs",
-    "viewer/pdfjs-metadata-hydration.mjs",
-    "viewer/pdfjs-position-restore.mjs",
-    "viewer/pdfjs-position-tracking.mjs",
-    "viewer/position-save-controller.mjs",
-    "shared/position-update-messaging.mjs",
-    "shared/position.mjs",
-    "viewer/viewer-boot.mjs",
-    "viewer/viewer-url.mjs",
-    "viewer/viewer-view.mjs",
-    "storage/books.mjs",
-    "shared/local-pdf-url.mjs",
-  ];
-  const resourceAttribute = /<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"[^>]*>/gi;
+  const appHtmlFiles = await discoverAppHtmlFiles(projectRoot);
+  const graph = await validateStaticResourceGraph({
+    projectRoot,
+    entryFiles: [
+      manifest.background.service_worker,
+      manifest.action.default_popup,
+      ...appHtmlFiles,
+    ],
+  });
 
   assert.deepEqual(manifest.content_security_policy, expectedExtensionCsp);
   assert.deepEqual(manifest.host_permissions, ["file:///*"]);
-
-  for (const appFile of appFiles) {
-    const source = await readFile(resolveExtensionPath(appFile), "utf8");
-    assert.doesNotMatch(source, /(?:src|href)\s*=\s*["'](?:https?:)?\/\//i);
-    assert.doesNotMatch(source, /\b(?:fetch|import)\s*\(\s*["'](?:https?:)?\/\//i);
-  }
+  assert.equal(graph.includes("popup/popup-entry.mjs"), true);
+  assert.equal(graph.includes("shared/local-pdf-url.mjs"), true);
+  assert.equal(graph.includes("viewer/viewer-app.mjs"), true);
 
   const vendorHtmlPath = resolveExtensionPath("viewer/pdfjs/web/viewer.html");
   const vendorHtml = await readFile(vendorHtmlPath, "utf8");
-  for (const [, resource] of vendorHtml.matchAll(resourceAttribute)) {
+  for (const resource of discoverHtmlResourceReferences(vendorHtml)) {
     assert.doesNotMatch(resource, /^(?:https?:)?\/\//i);
     if (resource === "#") {
       continue;
     }
-    await access(path.resolve(path.dirname(vendorHtmlPath), resource));
+    await assertRegularFile(path.resolve(path.dirname(vendorHtmlPath), resource), resource);
   }
 });
 

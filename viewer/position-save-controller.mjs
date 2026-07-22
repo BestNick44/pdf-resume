@@ -1,3 +1,7 @@
+import {
+  createPositionObservationSource,
+  validPositionObservation,
+} from "../shared/position-update-messaging.mjs";
 import { samePosition, validPosition } from "../shared/position.mjs";
 
 const DEFAULT_DEBOUNCE_MILLISECONDS = 1_000;
@@ -19,6 +23,7 @@ export function createPositionSaveController({
   updatePosition,
   scheduler = globalThis,
   clock = { now: () => Date.now() },
+  observationSource,
   debounceMilliseconds = DEFAULT_DEBOUNCE_MILLISECONDS,
   retryDelaysMilliseconds = DEFAULT_RETRY_DELAYS_MILLISECONDS,
 }) {
@@ -42,15 +47,25 @@ export function createPositionSaveController({
     throw new TypeError("debounceMilliseconds must be non-negative");
   }
   const retryDelays = validateDelays(retryDelaysMilliseconds);
+  const observations =
+    observationSource ?? createPositionObservationSource({ clock });
+  if (!observations || typeof observations.next !== "function") {
+    throw new TypeError("observationSource must provide next");
+  }
 
   let latestPosition = validPosition(initialPosition);
+  let latestObservation;
   let savedPosition = latestPosition;
-  let readyPosition;
+  let readyUpdate;
   let timer;
   let timerKind;
-  let deadline;
   let running;
+  let activeUpdate;
   let failedAttempts = 0;
+  let retriesExhausted = false;
+  let retirementPromise;
+  let resolveRetirement;
+  let retired = false;
   let destroyed = false;
   let disabled = false;
 
@@ -60,25 +75,66 @@ export function createPositionSaveController({
       timer = undefined;
     }
     timerKind = undefined;
-    deadline = undefined;
   }
 
   function scheduleTimer(kind, delay) {
     cancelTimer();
     timerKind = kind;
-    deadline = clock.now() + delay;
     timer = scheduler.setTimeout(onDeadline, delay);
   }
 
-  function scheduleRetry(position) {
-    readyPosition = position;
+  function observationValue(observation) {
+    return Object.freeze(
+      validPositionObservation(observation ?? observations.next()),
+    );
+  }
+
+  function captureLatest(position, observation) {
+    const positionValue = validPosition(position);
+    if (samePosition(positionValue, latestPosition)) {
+      return false;
+    }
+    latestPosition = positionValue;
+    latestObservation = observationValue(observation);
+    return true;
+  }
+
+  function latestUpdate() {
+    latestObservation ??= observationValue();
+    return {
+      position: latestPosition,
+      observation: latestObservation,
+    };
+  }
+
+  function scheduleRetry(update) {
+    readyUpdate = update;
     if (failedAttempts >= retryDelays.length) {
       failedAttempts = 0;
+      retriesExhausted = true;
       return;
     }
     const delay = retryDelays[failedAttempts];
     failedAttempts += 1;
     scheduleTimer("retry", delay);
+  }
+
+  function finishRetirement() {
+    if (
+      !resolveRetirement ||
+      (!destroyed &&
+        (running ||
+          (!disabled &&
+            !retriesExhausted &&
+            (readyUpdate ||
+              timer !== undefined ||
+              !samePosition(latestPosition, savedPosition)))))
+    ) {
+      return;
+    }
+    const resolve = resolveRetirement;
+    resolveRetirement = undefined;
+    resolve();
   }
 
   function startPump() {
@@ -87,71 +143,80 @@ export function createPositionSaveController({
     }
 
     running = (async () => {
-      while (readyPosition && !destroyed && !disabled) {
-        const position = readyPosition;
-        readyPosition = undefined;
-        if (samePosition(position, savedPosition)) {
+      while (readyUpdate && !destroyed && !disabled) {
+        const update = readyUpdate;
+        readyUpdate = undefined;
+        if (samePosition(update.position, savedPosition)) {
           failedAttempts = 0;
           continue;
         }
 
+        activeUpdate = update;
         try {
-          const updated = await updatePosition(fileUrl, position);
+          const updated = await updatePosition(
+            fileUrl,
+            update.position,
+            update.observation,
+          );
           if (updated === undefined) {
             disabled = true;
-            readyPosition = undefined;
+            readyUpdate = undefined;
             cancelTimer();
             break;
           }
-          savedPosition = position;
+          savedPosition = update.position;
           failedAttempts = 0;
         } catch {
-          if (readyPosition) {
+          if (destroyed || disabled) {
+            break;
+          }
+          if (readyUpdate) {
             failedAttempts = 0;
             continue;
           }
-          if (!samePosition(latestPosition, position)) {
+          if (!samePosition(latestPosition, update.position)) {
             failedAttempts = 0;
             break;
           }
-          scheduleRetry(position);
+          scheduleRetry(update);
           break;
+        } finally {
+          if (activeUpdate === update) {
+            activeUpdate = undefined;
+          }
         }
       }
     })().finally(() => {
       running = undefined;
+      finishRetirement();
     });
     return running;
   }
 
   function makeReady({ resetFailures = false } = {}) {
     if (destroyed || disabled) {
+      finishRetirement();
       return Promise.resolve();
     }
     if (resetFailures) {
       failedAttempts = 0;
+      retriesExhausted = false;
     }
-    readyPosition = latestPosition;
+    readyUpdate = latestUpdate();
     return startPump();
   }
 
   function onDeadline() {
     timer = undefined;
-    const remaining = deadline - clock.now();
-    if (remaining > 0) {
-      timer = scheduler.setTimeout(onDeadline, remaining);
-      return;
-    }
     const expiredKind = timerKind;
     timerKind = undefined;
-    deadline = undefined;
     return makeReady({ resetFailures: expiredKind === "debounce" });
   }
 
   function status() {
     const durable =
       !disabled &&
-      !readyPosition &&
+      !readyUpdate &&
       timer === undefined &&
       !running &&
       samePosition(latestPosition, savedPosition);
@@ -164,38 +229,64 @@ export function createPositionSaveController({
   }
 
   return Object.freeze({
-    needsSave(position) {
-      if (destroyed || disabled) {
-        return false;
-      }
-      return !samePosition(validPosition(position), savedPosition);
-    },
-
-    observe(position) {
-      if (destroyed || disabled) {
+    observe(position, observation) {
+      if (destroyed || disabled || retired) {
         return;
       }
-      const positionValue = validPosition(position);
-      if (samePosition(positionValue, latestPosition)) {
-        if (readyPosition && timerKind !== "retry") {
+      if (!captureLatest(position, observation)) {
+        if (readyUpdate && timerKind !== "retry") {
           scheduleTimer("debounce", debounceMilliseconds);
         }
         return;
       }
-      latestPosition = positionValue;
       failedAttempts = 0;
       scheduleTimer("debounce", debounceMilliseconds);
     },
 
     flush(position) {
-      if (destroyed || disabled) {
+      if (destroyed || disabled || retired) {
         return Promise.resolve();
       }
       if (position !== undefined) {
-        latestPosition = validPosition(position);
+        captureLatest(position);
       }
       cancelTimer();
       return makeReady({ resetFailures: true });
+    },
+
+    retire() {
+      if (retirementPromise) {
+        return retirementPromise;
+      }
+      retired = true;
+      retirementPromise = new Promise((resolve) => {
+        resolveRetirement = resolve;
+      });
+      cancelTimer();
+      void makeReady({ resetFailures: true });
+      finishRetirement();
+      return retirementPromise;
+    },
+
+    prepareHandoff(position) {
+      if (destroyed || disabled || retired) {
+        return undefined;
+      }
+      captureLatest(position);
+      const olderUpdatePending = [activeUpdate, readyUpdate].some(
+        (update) => update && !samePosition(update.position, latestPosition),
+      );
+      if (
+        samePosition(latestPosition, savedPosition) &&
+        !olderUpdatePending
+      ) {
+        return undefined;
+      }
+      const update = latestUpdate();
+      return Object.freeze({
+        position: validPosition(update.position),
+        observation: Object.freeze(validPositionObservation(update.observation)),
+      });
     },
 
     async settled() {
@@ -206,9 +297,13 @@ export function createPositionSaveController({
     },
 
     destroy() {
+      if (destroyed) {
+        return;
+      }
       destroyed = true;
-      readyPosition = undefined;
+      readyUpdate = undefined;
       cancelTimer();
+      finishRetirement();
     },
   });
 }

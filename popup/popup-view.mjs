@@ -89,7 +89,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     action.hidden = false;
   }
 
-  function createLibraryBook(details, busy) {
+  function createLibraryBook(details, busy, index) {
     const item = hostDocument.createElement("li");
     const button = hostDocument.createElement("button");
     const title = hostDocument.createElement("span");
@@ -97,6 +97,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     const progressRow = hostDocument.createElement("span");
     const progress = hostDocument.createElement("progress");
     const progressLabel = hostDocument.createElement("span");
+    const progressLabelId = `library-progress-${index}`;
     const summaryText = `Page ${details.currentPage} of ${
       details.totalPages > 0 ? details.totalPages : "—"
     }`;
@@ -114,10 +115,18 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     progressRow.className = "progress-row";
     progress.max = 100;
     progress.setAttribute("aria-label", `Reading progress for ${details.title}`);
+    progressLabel.setAttribute("id", progressLabelId);
     if (details.progressPercent === null) {
+      progress.hidden = true;
       progressLabel.textContent = "Progress unavailable";
+      progressLabel.setAttribute(
+        "aria-label",
+        `Reading progress for ${details.title}: unavailable`,
+      );
+      button.setAttribute("aria-describedby", progressLabelId);
     } else {
       progress.value = details.progressPercent;
+      progress.setAttribute("aria-describedby", progressLabelId);
       progressLabel.textContent = `${details.progressPercent}%`;
     }
 
@@ -189,7 +198,9 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       status.textContent = details.status ?? "Your library";
       library.hidden = false;
       libraryList.replaceChildren(
-        ...books.map((bookDetails) => createLibraryBook(bookDetails, details.busy)),
+        ...books.map((bookDetails, index) =>
+          createLibraryBook(bookDetails, details.busy, index),
+        ),
       );
       if (books.length === 0) {
         message.textContent = "No tracked books yet. Open a local PDF to add one.";
@@ -245,7 +256,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
         progress.hidden = true;
         progressPercent.textContent = "Progress unavailable";
       }
-      customTitle.value = details.customTitle ?? "";
+      customTitle.value = details.customTitleDraft ?? details.customTitle ?? "";
       if (details.error) {
         error.textContent = details.error;
         error.hidden = false;

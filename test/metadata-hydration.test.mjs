@@ -181,12 +181,30 @@ test("filename fallback decodes Unicode and removes only separator noise and PDF
   );
 });
 
-test("filename cleanup uses untitled for separator, invisible, or control-only basenames", () => {
+test("filename fallback preserves Unicode joiners in emoji and orthographic text", () => {
+  assert.equal(
+    titleFromLocalPdfFilename(
+      "file:///tmp/%F0%9F%91%A9%E2%80%8D%F0%9F%92%BB.pdf",
+    ),
+    "👩‍💻",
+  );
+  assert.equal(
+    titleFromLocalPdfFilename(
+      "file:///tmp/%D9%85%DB%8C%E2%80%8C%D8%B1%D9%88%D9%85.pdf",
+    ),
+    "می‌روم",
+  );
+});
+
+test("filename cleanup uses untitled for separator, invisible, bidi, or control-only basenames", () => {
   const untitledUrls = [
     "file:///tmp/---___.pdf",
     "file:///tmp/%20---%20.pdf",
     "file:///tmp/____.pdf",
-    "file:///tmp/%E2%80%8B%01.pdf",
+    "file:///tmp/%E2%80%8B.pdf",
+    "file:///tmp/%E2%80%AE.pdf",
+    "file:///tmp/%01.pdf",
+    "file:///tmp/%E2%80%8C%E2%80%8D.pdf",
     "file:///tmp/.pdf",
   ];
 
