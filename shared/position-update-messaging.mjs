@@ -2,6 +2,12 @@
 
 import { canonicalizeLocalPdfUrl } from "./local-pdf-url.mjs";
 import { validPosition as validPositionValues } from "./position.mjs";
+import {
+  isPlainObject,
+  randomHexId,
+  RESULT_STATUSES,
+  STORAGE_RESULT_STATUSES,
+} from "./strict-record.mjs";
 
 /** @typedef {import("../types/storage.d.ts").ClientResultStatus} ClientResultStatus */
 /** @typedef {import("../types/storage.d.ts").PendingPositionHandoffMessage} PendingPositionHandoffMessage */
@@ -19,30 +25,9 @@ const UPDATE_POSITION_MESSAGE = "pdf-resume/private/update-position";
 const PENDING_POSITION_HANDOFF_MESSAGE =
   "pdf-resume/private/handoff-pending-position";
 const UPDATE_POSITION_RESULT = "pdf-resume/private/update-position-result";
-/** @type {ReadonlySet<unknown>} */
-const RESULT_STATUSES = new Set(["updated", "stale", "missing", "failed", "invalid"]);
-/** @type {ReadonlySet<unknown>} */
-const STORAGE_RESULT_STATUSES = new Set([
-  "updated",
-  "stale",
-  "missing",
-  "invalid",
-]);
 const POSITION_FIELDS = ["currentPage", "scrollTop"];
 const OBSERVATION_FIELDS = ["viewerId", "sequence", "observedAt"];
 const POSITION_ID_PATTERN = /^[0-9a-f]{32}$/;
-
-/**
- * @param {unknown} value
- * @returns {value is Record<PropertyKey, unknown>}
- */
-function isPlainObject(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
 
 /**
  * @param {unknown} value
@@ -151,13 +136,7 @@ export function validPositionObservation(observation) {
 
 /** @returns {string} */
 function randomViewerId() {
-  const values = new Uint8Array(16);
-  const crypto = globalThis.crypto;
-  if (!crypto || typeof crypto.getRandomValues !== "function") {
-    throw new Error("position observations require crypto.getRandomValues");
-  }
-  crypto.getRandomValues(values);
-  return [...values].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return randomHexId("position observations require crypto.getRandomValues");
 }
 
 /**
@@ -308,7 +287,7 @@ function parseResult(response) {
   );
   if (
     result.type !== UPDATE_POSITION_RESULT ||
-    !RESULT_STATUSES.has(result.status)
+    !RESULT_STATUSES.has(/** @type {ClientResultStatus} */ (result.status))
   ) {
     throw new TypeError("invalid position update response");
   }

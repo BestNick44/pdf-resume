@@ -5,6 +5,11 @@ import {
   validPositionObservation,
   validPositionTrackingGeneration,
 } from "../shared/position-update-messaging.mjs";
+import {
+  isPlainObject,
+  randomHexId,
+  STORAGE_RESULT_STATUSES,
+} from "../shared/strict-record.mjs";
 
 /** @typedef {import("../types/storage.d.ts").BookRecord} BookRecord */
 /** @typedef {import("../types/storage.d.ts").PositionObservation} PositionObservation */
@@ -79,18 +84,6 @@ export class BooksStorageDataError extends Error {
     super(message);
     this.name = "BooksStorageDataError";
   }
-}
-
-/**
- * @param {unknown} value
- * @returns {value is Record<PropertyKey, unknown>}
- */
-function isPlainObject(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
 }
 
 /**
@@ -740,13 +733,7 @@ function currentMilliseconds(nowMilliseconds) {
 
 /** @returns {string} */
 function randomTrackingGeneration() {
-  const values = new Uint8Array(16);
-  const crypto = globalThis.crypto;
-  if (!crypto || typeof crypto.getRandomValues !== "function") {
-    throw new Error("position tracking generations require crypto.getRandomValues");
-  }
-  crypto.getRandomValues(values);
-  return [...values].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return randomHexId("position tracking generations require crypto.getRandomValues");
 }
 
 /**
@@ -902,13 +889,13 @@ export function createBooksStorage({
       );
       const existing = books[canonicalUrl];
       if (!existing) {
-        return "missing";
+        return STORAGE_RESULT_STATUSES.missing;
       }
 
       let currentOrder;
       if (requireRegisteredViewer) {
         if (!relevantOrder?.current) {
-          return "stale";
+          return STORAGE_RESULT_STATUSES.stale;
         }
         currentOrder = relevantOrder.current;
       } else {
@@ -916,7 +903,7 @@ export function createBooksStorage({
           relevantOrder?.current &&
           relevantOrder.current.generation !== trackingGeneration
         ) {
-          return "stale";
+          return STORAGE_RESULT_STATUSES.stale;
         }
         currentOrder = positionOrderFrom(
           relevantOrder,
@@ -926,24 +913,24 @@ export function createBooksStorage({
 
       const viewerOrder = currentOrder.viewers[observation.viewerId];
       if (requireRegisteredViewer && !viewerOrder) {
-        return "stale";
+        return STORAGE_RESULT_STATUSES.stale;
       }
       if (viewerOrder && observation.sequence <= viewerOrder.sequence) {
-        return "stale";
+        return STORAGE_RESULT_STATUSES.stale;
       }
       if (!viewerOrder) {
         if (observation.observedAt > currentMilliseconds(millisecondsNow)) {
-          return "invalid";
+          return STORAGE_RESULT_STATUSES.invalid;
         }
         if (!registerPositionViewer(currentOrder, observation.viewerId)) {
-          return "stale";
+          return STORAGE_RESULT_STATUSES.stale;
         }
       }
       if (
         !relevantOrder?.current &&
         observedTimestamp < existing.lastReadAt
       ) {
-        return "stale";
+        return STORAGE_RESULT_STATUSES.stale;
       }
 
       const effectiveTime = Math.max(
@@ -968,7 +955,7 @@ export function createBooksStorage({
         await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
           [POSITION_ORDER_KEY]: positionOrder,
         });
-        return "stale";
+        return STORAGE_RESULT_STATUSES.stale;
       }
 
       currentOrder.winner = candidate;
@@ -981,7 +968,7 @@ export function createBooksStorage({
         [BOOKS_KEY]: books,
         [POSITION_ORDER_KEY]: positionOrder,
       });
-      return "updated";
+      return STORAGE_RESULT_STATUSES.updated;
     });
   }
 
