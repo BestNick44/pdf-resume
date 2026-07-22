@@ -237,7 +237,7 @@ test("popup resources are packaged and comply with extension-page CSP", async ()
   }
 });
 
-test("background entry registers navigation and private ordered position-update handlers", async () => {
+test("background entry registers navigation and private position-observation handlers", async () => {
   const manifest = await readManifest();
   const workerPath = resolveExtensionPath(manifest.background.service_worker);
   const worker = await readFile(workerPath, "utf8");
@@ -250,13 +250,13 @@ test("background entry registers navigation and private ordered position-update 
   );
   assert.match(
     worker,
-    /import \{\s+getBook,\s+updatePendingPositionObservation,\s+updatePositionObservation,\s+\} from "\.\/storage\/books\.mjs";/,
+    /import \{ getBook, recordObservation \} from "\.\/storage\/books\.mjs";/,
   );
   assert.match(worker, /runtime\.onMessage\.addListener/);
   assert.match(worker, /onBeforeNavigate\.addListener/);
   assert.match(
     worker,
-    /createPositionUpdateMessageHandler\(\{[\s\S]*updatePendingPositionObservation,[\s\S]*updatePositionObservation,[\s\S]*\}\)/,
+    /createPositionUpdateMessageHandler\(\{[\s\S]*recordObservation,[\s\S]*\}\)/,
   );
   await assertPackagedFile("shared/position-update-messaging.mjs");
   await assertPackagedFile("storage/books.mjs");
@@ -310,9 +310,8 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   );
   assert.match(
     viewerApp,
-    /handoffPendingPosition: positionUpdates\.handoffPendingPosition/,
+    /recordObservation: positionUpdates\.recordObservation/,
   );
-  assert.match(viewerApp, /handoffPosition: positionUpdates\.handoffPosition/);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("popup/popup-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-entry.mjs")]);
   await execFileAsync(process.execPath, ["--check", resolveExtensionPath("viewer/viewer-app.mjs")]);
@@ -384,12 +383,16 @@ test("shared storage module exposes its API without resolving extension globals 
       "updateCustomTitle",
       "removeBook",
       "listBooks",
-      "updatePendingPositionObservation",
-      "updatePositionObservation",
+      "recordObservation",
     ].filter((operation) => typeof storageModule[operation] !== "function"),
     [],
   );
   assert.equal(Object.hasOwn(storageModule, "updatePosition"), false);
+  assert.equal(
+    Object.hasOwn(storageModule, "updatePendingPositionObservation"),
+    false,
+  );
+  assert.equal(Object.hasOwn(storageModule, "updatePositionObservation"), false);
 });
 
 test("viewer accepts canonically encoded local PDF URLs", async () => {

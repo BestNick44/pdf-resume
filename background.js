@@ -2,11 +2,7 @@
 
 import { canonicalizeLocalPdfUrl } from "./shared/local-pdf-url.mjs";
 import { createPositionUpdateMessageHandler } from "./shared/position-update-messaging.mjs";
-import {
-  getBook,
-  updatePendingPositionObservation,
-  updatePositionObservation,
-} from "./storage/books.mjs";
+import { getBook, recordObservation } from "./storage/books.mjs";
 
 /**
  * @typedef {{
@@ -141,8 +137,7 @@ if (runtime?.onMessage?.addListener && runtime.id) {
   runtime.onMessage.addListener(
     createPositionUpdateMessageHandler({
       extensionId: runtime.id,
-      updatePendingPositionObservation,
-      updatePositionObservation,
+      recordObservation,
     }),
   );
 }

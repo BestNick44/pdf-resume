@@ -3,6 +3,7 @@
 import { canonicalizeLocalPdfUrl } from "../shared/local-pdf-url.mjs";
 import {
   validPositionObservation,
+  validPositionObservationMetadata,
   validPositionTrackingGeneration,
 } from "../shared/position-update-messaging.mjs";
 import {
@@ -13,6 +14,7 @@ import {
 
 /** @typedef {import("../types/storage.d.ts").BookRecord} BookRecord */
 /** @typedef {import("../types/storage.d.ts").PositionObservation} PositionObservation */
+/** @typedef {import("../types/storage.d.ts").PositionObservationMetadata} PositionObservationMetadata */
 /** @typedef {import("../types/storage.d.ts").PositionOrderEntry} PositionOrderEntry */
 /** @typedef {import("../types/storage.d.ts").PositionWinner} PositionWinner */
 /** @typedef {import("../types/storage.d.ts").StorageMutationStatus} StorageMutationStatus */
@@ -24,7 +26,7 @@ import {
 /** @typedef {Pick<BookRecord, "title" | "totalPages">} HydrationPatch */
 /** @typedef {Partial<Pick<BookRecord, "currentPage" | "scrollTop">>} PositionPatch */
 /** @typedef {{ book: BookRecord, trackingGeneration: string }} PositionTrackingState */
-/** @typedef {{ legacy: PositionObservation, current?: undefined } | { legacy?: undefined, current: PositionOrderEntry }} RelevantPositionOrder */
+/** @typedef {{ legacy: PositionObservationMetadata, current?: undefined } | { legacy?: undefined, current: PositionOrderEntry }} RelevantPositionOrder */
 /**
  * @typedef {{
  *   storageArea?: Pick<chrome.storage.StorageArea, "get" | "set">,
@@ -45,8 +47,7 @@ import {
  *   hydrateMetadata(fileUrl: string, patch: HydrationPatch, options?: { signal?: AbortSignal }): Promise<BookRecord | undefined>,
  *   updateCustomTitle(fileUrl: string, customTitle: string | null): Promise<BookRecord | undefined>,
  *   removeBook(fileUrl: string): Promise<boolean>,
- *   updatePendingPositionObservation(fileUrl: string, patch: PositionPatch, observation: PositionObservation): Promise<StorageMutationStatus>,
- *   updatePositionObservation(fileUrl: string, patch: PositionPatch, observation: PositionObservation, trackingGeneration: string): Promise<StorageMutationStatus>,
+ *   recordObservation(fileUrl: string, patch: PositionPatch, observation: PositionObservation): Promise<StorageMutationStatus>,
  * }} BooksStorage
  */
 
@@ -372,7 +373,7 @@ function validateEffectiveTime(value) {
 
 /** @param {unknown} value */
 function validateViewerId(value) {
-  return validPositionObservation({
+  return validPositionObservationMetadata({
     viewerId: value,
     sequence: 1,
     observedAt: 0,
@@ -578,7 +579,7 @@ function readRelevantPositionOrder(positionOrder, canonicalUrl) {
   try {
     const value = positionOrder[canonicalUrl];
     return isLegacyPositionOrder(value)
-      ? { legacy: validPositionObservation(value) }
+      ? { legacy: validPositionObservationMetadata(value) }
       : { current: validateCurrentPositionOrder(value) };
   } catch (error) {
     throw new BooksStorageDataError(
@@ -601,7 +602,7 @@ function createPositionOrder(generation) {
 }
 
 /**
- * @param {PositionObservation} observation
+ * @param {PositionObservationMetadata} observation
  * @param {string} generation
  * @returns {PositionOrderEntry}
  */
@@ -835,7 +836,7 @@ export function createBooksStorage({
    * @param {{
    *   canonicalUrl: string,
    *   patch: PositionPatch,
-   *   observation: PositionObservation,
+   *   observation: PositionObservationMetadata,
    *   requireRegisteredViewer: boolean,
    *   trackingGeneration?: string,
    * }} mutation
@@ -1139,29 +1140,21 @@ export function createBooksStorage({
       });
     },
 
-    async updatePendingPositionObservation(fileUrl, patch, observation) {
+    async recordObservation(fileUrl, patch, observation) {
+      const recordedObservation = validPositionObservation(observation);
+      const observationMetadata = {
+        viewerId: recordedObservation.viewerId,
+        sequence: recordedObservation.sequence,
+        observedAt: recordedObservation.observedAt,
+      };
       return mutatePositionObservation({
         canonicalUrl: canonicalFileUrl(fileUrl),
         patch: validatePositionPatch(patch),
-        observation: validPositionObservation(observation),
-        requireRegisteredViewer: true,
-      });
-    },
-
-    async updatePositionObservation(
-      fileUrl,
-      patch,
-      observation,
-      trackingGeneration,
-    ) {
-      return mutatePositionObservation({
-        canonicalUrl: canonicalFileUrl(fileUrl),
-        patch: validatePositionPatch(patch),
-        observation: validPositionObservation(observation),
-        requireRegisteredViewer: false,
-        trackingGeneration: validPositionTrackingGeneration(
-          trackingGeneration,
-        ),
+        observation: observationMetadata,
+        requireRegisteredViewer: recordedObservation.intent === "pending",
+        ...(recordedObservation.intent === "registered"
+          ? { trackingGeneration: recordedObservation.trackingGeneration }
+          : {}),
       });
     },
 
@@ -1237,34 +1230,6 @@ export async function listBooks() {
  * @param {PositionPatch} patch
  * @param {PositionObservation} observation
  */
-export async function updatePendingPositionObservation(
-  fileUrl,
-  patch,
-  observation,
-) {
-  return defaultStorage().updatePendingPositionObservation(
-    fileUrl,
-    patch,
-    observation,
-  );
-}
-
-/**
- * @param {string} fileUrl
- * @param {PositionPatch} patch
- * @param {PositionObservation} observation
- * @param {string} trackingGeneration
- */
-export async function updatePositionObservation(
-  fileUrl,
-  patch,
-  observation,
-  trackingGeneration,
-) {
-  return defaultStorage().updatePositionObservation(
-    fileUrl,
-    patch,
-    observation,
-    trackingGeneration,
-  );
+export async function recordObservation(fileUrl, patch, observation) {
+  return defaultStorage().recordObservation(fileUrl, patch, observation);
 }

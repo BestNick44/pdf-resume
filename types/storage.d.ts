@@ -26,11 +26,25 @@ export interface PositionOrderEntry {
   viewers: Record<string, ViewerHighWaterMark>;
 }
 
-export interface PositionObservation {
+export interface PositionObservationMetadata {
   viewerId: string;
   sequence: number;
   observedAt: number;
 }
+
+export interface RegisteredPositionObservation
+  extends PositionObservationMetadata {
+  intent: "registered";
+  trackingGeneration: string;
+}
+
+export interface PendingPositionObservation extends PositionObservationMetadata {
+  intent: "pending";
+}
+
+export type PositionObservation =
+  | RegisteredPositionObservation
+  | PendingPositionObservation;
 
 export interface Position {
   currentPage: number;
@@ -41,16 +55,8 @@ export type StorageMutationStatus = "updated" | "stale" | "missing" | "invalid";
 
 export type ClientResultStatus = StorageMutationStatus | "failed";
 
-export interface UpdatePositionMessage {
-  type: "pdf-resume/private/update-position";
-  fileUrl: string;
-  position: Position;
-  observation: PositionObservation;
-  trackingGeneration: string;
-}
-
-export interface PendingPositionHandoffMessage {
-  type: "pdf-resume/private/handoff-pending-position";
+export interface RecordObservationMessage {
+  type: "pdf-resume/private/record-observation";
   fileUrl: string;
   position: Position;
   observation: PositionObservation;

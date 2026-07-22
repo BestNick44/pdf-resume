@@ -2,7 +2,7 @@
 
 import {
   createPositionObservationSource,
-  validPositionObservation,
+  validPositionObservationMetadata,
   validPositionTrackingGeneration,
 } from "../shared/position-update-messaging.mjs";
 import { samePosition, validPosition } from "../shared/position.mjs";
@@ -24,6 +24,7 @@ import { createPositionSaveController } from "./position-save-controller.mjs";
 /** @typedef {import("../types/storage.d.ts").BookRecord} BookRecord */
 /** @typedef {import("../types/storage.d.ts").Position} Position */
 /** @typedef {import("../types/storage.d.ts").PositionObservation} PositionObservation */
+/** @typedef {import("../types/storage.d.ts").PositionObservationMetadata} PositionObservationMetadata */
 /** @typedef {PdfJsApplication & { appConfig: { mainContainer: HTMLElement } }} PositionPdfJsApplication */
 /** @typedef {ReturnType<typeof createPdfJsRenderOutcomeTracker>} RenderOutcomeTracker */
 /** @typedef {ReturnType<typeof createPdfJsRestoreLifecycle>} RestoreLifecycle */
@@ -38,7 +39,7 @@ import { createPositionSaveController } from "./position-save-controller.mjs";
  * }} PositionTrackingScheduler
  */
 
-/** @typedef {{ viewerId: string, next: () => PositionObservation }} PositionObservationSource */
+/** @typedef {{ viewerId: string, next: () => PositionObservationMetadata }} PositionObservationSource */
 /** @typedef {{ book: BookRecord, trackingGeneration: string }} PositionTrackingState */
 
 const DEFAULT_INITIAL_READ_RETRY_DELAYS = Object.freeze([250, 1_000, 4_000]);
@@ -63,24 +64,30 @@ function validateRetryDelays(delays) {
 }
 
 /**
+ * @param {PositionObservationMetadata} observation
+ * @param {string} trackingGeneration
+ * @returns {PositionObservation}
+ */
+function registeredObservation(observation, trackingGeneration) {
+  return {
+    ...observation,
+    intent: "registered",
+    trackingGeneration,
+  };
+}
+
+/**
  * @param {{
  *   fileUrl: string,
  *   frame: PdfJsFrame,
  *   hostDocument: Document,
  *   getPositionTrackingState: (fileUrl: string, viewerId: string) => Promise<PositionTrackingState | undefined>,
- *   updatePosition: (
+ *   recordObservation: (
  *     fileUrl: string,
  *     position: Position,
  *     observation: PositionObservation,
- *     trackingGeneration: string,
- *   ) => Promise<Position | undefined>,
- *   handoffPendingPosition: (fileUrl: string, position: Position, observation: PositionObservation) => void,
- *   handoffPosition: (
- *     fileUrl: string,
- *     position: Position,
- *     observation: PositionObservation,
- *     trackingGeneration: string,
- *   ) => void,
+ *     options?: { handoff?: boolean },
+ *   ) => Promise<Position | undefined> | undefined,
  *   scheduler?: PositionTrackingScheduler,
  *   clock?: { now: () => number },
  *   observationSource?: PositionObservationSource,
@@ -97,9 +104,7 @@ export function createPdfJsPositionTracking({
   frame,
   hostDocument,
   getPositionTrackingState,
-  updatePosition,
-  handoffPendingPosition,
-  handoffPosition,
+  recordObservation,
   scheduler = globalThis,
   clock = { now: () => Date.now() },
   observationSource,
@@ -122,9 +127,7 @@ export function createPdfJsPositionTracking({
   }
   if (
     typeof getPositionTrackingState !== "function" ||
-    typeof updatePosition !== "function" ||
-    typeof handoffPendingPosition !== "function" ||
-    typeof handoffPosition !== "function" ||
+    typeof recordObservation !== "function" ||
     typeof restorePosition !== "function" ||
     typeof createRenderOutcomeTracker !== "function" ||
     typeof createRestoreLifecycle !== "function" ||
@@ -146,7 +149,7 @@ export function createPdfJsPositionTracking({
   if (!observations || typeof observations.next !== "function") {
     throw new TypeError("observationSource must provide next");
   }
-  const observationViewerId = validPositionObservation({
+  const observationViewerId = validPositionObservationMetadata({
     viewerId: observations.viewerId,
     sequence: 1,
     observedAt: 0,
@@ -175,7 +178,7 @@ export function createPdfJsPositionTracking({
   let restoreLifecycle;
   /** @type {Position | undefined} */
   let restoringPosition;
-  /** @type {{ position: Position, observation: PositionObservation } | undefined} */
+  /** @type {{ position: Position, observation: PositionObservationMetadata } | undefined} */
   let restorationObservation;
   let restorationHandoffSent = false;
   /** @type {string | undefined} */
@@ -374,14 +377,15 @@ export function createPdfJsPositionTracking({
       /**
        * @param {string} fileUrl
        * @param {Position} position
-       * @param {PositionObservation} observation
+       * @param {PositionObservationMetadata} observation
        */
-      updatePosition(fileUrl, position, observation) {
-        return updatePosition(
-          fileUrl,
-          position,
-          observation,
-          activeTrackingGeneration,
+      recordObservation(fileUrl, position, observation) {
+        return /** @type {Promise<Position | undefined>} */ (
+          recordObservation(
+            fileUrl,
+            position,
+            registeredObservation(observation, activeTrackingGeneration),
+          )
         );
       },
       scheduler,
@@ -390,7 +394,7 @@ export function createPdfJsPositionTracking({
     });
     /**
      * @param {Position} [position]
-     * @param {PositionObservation} [observation]
+     * @param {PositionObservationMetadata} [observation]
      */
     const capturePosition = (position, observation) => {
       if (!isCurrentDocument(documentIdentity, expectedGeneration)) {
@@ -690,10 +694,14 @@ export function createPdfJsPositionTracking({
       }
       restorationHandoffSent = true;
       try {
-        handoffPendingPosition(
+        recordObservation(
           fileUrl,
           position,
-          restorationObservation.observation,
+          {
+            ...restorationObservation.observation,
+            intent: "pending",
+          },
+          { handoff: true },
         );
       } catch {
         // The lifecycle sender cannot synchronously wait for or report durable storage.
@@ -726,11 +734,11 @@ export function createPdfJsPositionTracking({
       };
     }
     try {
-      handoffPosition(
+      recordObservation(
         fileUrl,
         handoff.position,
-        handoff.observation,
-        trackingGeneration,
+        registeredObservation(handoff.observation, trackingGeneration),
+        { handoff: true },
       );
     } catch {
       // The lifecycle sender cannot synchronously wait for or report durable storage.

@@ -2,12 +2,12 @@
 
 import {
   createPositionObservationSource,
-  validPositionObservation,
+  validPositionObservationMetadata,
 } from "../shared/position-update-messaging.mjs";
 import { samePosition, validPosition } from "../shared/position.mjs";
 
 /** @typedef {import("../types/storage.d.ts").Position} Position */
-/** @typedef {import("../types/storage.d.ts").PositionObservation} PositionObservation */
+/** @typedef {import("../types/storage.d.ts").PositionObservationMetadata} PositionObservationMetadata */
 /**
  * @typedef {{
  *   setTimeout: (callback: () => void, delay: number) => ReturnType<typeof globalThis.setTimeout>,
@@ -15,8 +15,8 @@ import { samePosition, validPosition } from "../shared/position.mjs";
  * }} TimerScheduler
  */
 /** @typedef {{ now: () => number }} Clock */
-/** @typedef {{ next: () => PositionObservation }} PositionObservationSource */
-/** @typedef {{ position: Position, observation: PositionObservation }} PositionUpdate */
+/** @typedef {{ next: () => PositionObservationMetadata }} PositionObservationSource */
+/** @typedef {{ position: Position, observation: PositionObservationMetadata }} PositionUpdate */
 /** @typedef {"debounce" | "retry"} TimerKind */
 /** @typedef {{ disabled: boolean, durable: boolean, pending: boolean, retryPending: boolean }} SaveStatus */
 
@@ -43,10 +43,10 @@ function validateDelays(delays) {
  * @param {{
  *   fileUrl: string,
  *   initialPosition: Position,
- *   updatePosition: (
+ *   recordObservation: (
  *     fileUrl: string,
  *     position: Position,
- *     observation: PositionObservation,
+ *     observation: PositionObservationMetadata,
  *   ) => Promise<unknown>,
  *   scheduler?: TimerScheduler,
  *   clock?: Clock,
@@ -58,7 +58,7 @@ function validateDelays(delays) {
 export function createPositionSaveController({
   fileUrl,
   initialPosition,
-  updatePosition,
+  recordObservation,
   scheduler = globalThis,
   clock = { now: () => Date.now() },
   observationSource,
@@ -68,8 +68,8 @@ export function createPositionSaveController({
   if (typeof fileUrl !== "string") {
     throw new TypeError("fileUrl must be a string");
   }
-  if (typeof updatePosition !== "function") {
-    throw new TypeError("updatePosition must be a function");
+  if (typeof recordObservation !== "function") {
+    throw new TypeError("recordObservation must be a function");
   }
   if (
     !scheduler ||
@@ -93,7 +93,7 @@ export function createPositionSaveController({
 
   /** @type {Position} */
   let latestPosition = validPosition(initialPosition);
-  /** @type {PositionObservation | undefined} */
+  /** @type {PositionObservationMetadata | undefined} */
   let latestObservation;
   /** @type {Position} */
   let savedPosition = latestPosition;
@@ -136,18 +136,18 @@ export function createPositionSaveController({
   }
 
   /**
-   * @param {PositionObservation} [observation]
-   * @returns {Readonly<PositionObservation>}
+   * @param {PositionObservationMetadata} [observation]
+   * @returns {Readonly<PositionObservationMetadata>}
    */
   function observationValue(observation) {
     return Object.freeze(
-      validPositionObservation(observation ?? observations.next()),
+      validPositionObservationMetadata(observation ?? observations.next()),
     );
   }
 
   /**
    * @param {Position} position
-   * @param {PositionObservation} [observation]
+   * @param {PositionObservationMetadata} [observation]
    * @returns {boolean}
    */
   function captureLatest(position, observation) {
@@ -217,7 +217,7 @@ export function createPositionSaveController({
 
         activeUpdate = update;
         try {
-          const updated = await updatePosition(
+          const updated = await recordObservation(
             fileUrl,
             update.position,
             update.observation,
@@ -300,7 +300,7 @@ export function createPositionSaveController({
   return Object.freeze({
     /**
      * @param {Position} position
-     * @param {PositionObservation} [observation]
+     * @param {PositionObservationMetadata} [observation]
      */
     observe(position, observation) {
       if (destroyed || disabled || retired) {
@@ -358,7 +358,7 @@ export function createPositionSaveController({
       return Object.freeze({
         position: validPosition(update.position),
         observation: Object.freeze(
-          validPositionObservation(update.observation),
+          validPositionObservationMetadata(update.observation),
         ),
       });
     },
