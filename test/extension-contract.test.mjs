@@ -441,19 +441,14 @@ test("viewer shell is accessible and keeps local input out of markup", async () 
   assert.doesNotMatch(viewer, /<script\b(?![^>]*\bsrc=)[^>]*>/i);
 });
 
-test("variant A boots the PDF.js shell before the PDF fetch settles", async () => {
+test("variant B opens the authorized canonical file URL without buffering a Blob", async () => {
   const { bootViewer } = await import("../viewer/viewer-boot.mjs");
-  let releaseFetch;
-  const fetchPending = new Promise((resolve) => {
-    releaseFetch = resolve;
-  });
-  const shownViewerUrls = [];
   const openedDocuments = [];
 
-  const bootPending = bootViewer({
-    search: `?file=${encodeURIComponent("file:///tmp/book.pdf")}`,
-    fetchPdf: async () => fetchPending,
-    createObjectUrl: () => "blob:prototype",
+  const result = await bootViewer({
+    search: `?file=${encodeURIComponent("file:///tmp/My Book.pdf")}`,
+    fetchPdf: async () => assert.fail("variant B must not fetch the whole file"),
+    createObjectUrl: () => assert.fail("variant B must not create a Blob URL"),
     isFileSchemeAccessAllowed: async () => true,
     pdfJsViewerUrl: new URL(
       "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
@@ -461,40 +456,22 @@ test("variant A boots the PDF.js shell before the PDF fetch settles", async () =
     view: {
       showError: assert.fail,
       showFileAccessInstructions: assert.fail,
-      showViewer(viewerUrl) {
-        shownViewerUrls.push(viewerUrl.href);
-      },
+      showViewer() {},
       async openDocument(url, originalUrl) {
         openedDocuments.push([url, originalUrl]);
       },
     },
   });
 
-  await Promise.resolve();
-  assert.deepEqual(shownViewerUrls, [
-    "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
-  ]);
-  assert.deepEqual(openedDocuments, []);
-
-  releaseFetch({
-    ok: true,
-    blob: async () => new Blob(["%PDF-1.7\n"]),
-  });
-  assert.deepEqual(await bootPending, {
-    fileUrl: "file:///tmp/book.pdf",
-    objectUrl: "blob:prototype",
-  });
+  assert.deepEqual(result, { fileUrl: "file:///tmp/My%20Book.pdf" });
   assert.deepEqual(openedDocuments, [
-    ["blob:prototype", "file:///tmp/book.pdf"],
+    ["file:///tmp/My%20Book.pdf", "file:///tmp/My%20Book.pdf"],
   ]);
 });
 
 test("viewer boot displays a valid local PDF through the packaged PDF.js viewer", async () => {
   const { bootViewer } = await import("../viewer/viewer-boot.mjs");
   const { createViewerView } = await import("../viewer/viewer-view.mjs");
-  const pdfBlob = new Blob(["ignored prefix\n%PDF-1.7\n"]);
-  const fetchCalls = [];
-  const objectUrlBlobs = [];
   let loadListener;
   let loadOptions;
   let focusCalls = 0;
@@ -521,19 +498,12 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
   };
   const errorPanel = { hidden: true };
   const errorMessage = { textContent: "" };
-  const objectUrl = "blob:chrome-extension://abcdefghijkl/document-id";
   const search = `?file=${encodeURIComponent("file:///tmp/My Book.pdf")}`;
 
   const resultPending = bootViewer({
     search,
-    fetchPdf: async (...args) => {
-      fetchCalls.push(args);
-      return { ok: true, blob: async () => pdfBlob };
-    },
-    createObjectUrl(blob) {
-      objectUrlBlobs.push(blob);
-      return objectUrl;
-    },
+    fetchPdf: async () => assert.fail("variant B must not fetch the whole file"),
+    createObjectUrl: () => assert.fail("variant B must not create a Blob URL"),
     isFileSchemeAccessAllowed: async () => true,
     pdfJsViewerUrl: new URL(
       "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
@@ -548,16 +518,7 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
 
   assert.deepEqual(result, {
     fileUrl: "file:///tmp/My%20Book.pdf",
-    objectUrl,
   });
-  assert.deepEqual(fetchCalls, [
-    [
-      "file:///tmp/My%20Book.pdf",
-      { cache: "no-store", credentials: "omit", redirect: "error" },
-    ],
-  ]);
-  assert.equal(objectUrlBlobs.length, 1);
-  assert.equal(objectUrlBlobs[0], pdfBlob);
   assert.equal(frame.hidden, false);
   assert.equal(errorPanel.hidden, true);
   assert.equal(errorMessage.textContent, "");
@@ -568,7 +529,7 @@ test("viewer boot displays a valid local PDF through the packaged PDF.js viewer"
   assert.equal(displayedUrl.search, "");
   assert.deepEqual(openCalls, [
     {
-      url: objectUrl,
+      url: "file:///tmp/My%20Book.pdf",
       originalUrl: "file:///tmp/My%20Book.pdf",
     },
   ]);
@@ -625,71 +586,40 @@ test("viewer boot presents local input errors without creating or showing a view
   }
 });
 
-test("viewer boot rejects bad signatures and presents local read failures", async (t) => {
+test("variant B presents PDF.js file-open failures as local read errors", async () => {
   const { bootViewer } = await import("../viewer/viewer-boot.mjs");
-  const { createViewerView } = await import("../viewer/viewer-view.mjs");
-  const inputError =
-    "Provide exactly one encoded local PDF URL as ?file=<encoded file:// URL>.";
-  const readError =
-    "The local PDF could not be read. Verify that the file still exists and can be opened.";
-  const cases = [
-    {
-      name: "bad PDF signature",
-      fetchPdf: async () => ({ ok: true, blob: async () => new Blob(["not a PDF"]) }),
-      message: inputError,
-    },
-    {
-      name: "rejected file request",
-      fetchPdf: async () => {
+  const errors = [];
+  const shownViewers = [];
+
+  const result = await bootViewer({
+    search: `?file=${encodeURIComponent("file:///tmp/missing.pdf")}`,
+    fetchPdf: async () => assert.fail("variant B must not fetch the whole file"),
+    createObjectUrl: () => assert.fail("variant B must not create a Blob URL"),
+    isFileSchemeAccessAllowed: async () => true,
+    pdfJsViewerUrl: new URL(
+      "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+    ),
+    view: {
+      showError(message) {
+        errors.push(message);
+      },
+      showFileAccessInstructions: assert.fail,
+      showViewer(viewerUrl) {
+        shownViewers.push(viewerUrl.href);
+      },
+      async openDocument() {
         throw new TypeError("Failed to fetch");
       },
-      message: readError,
     },
-    {
-      name: "unsuccessful file response",
-      fetchPdf: async () => ({ ok: false, status: 404 }),
-      message: readError,
-    },
-  ];
+  });
 
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      const frame = {
-        hidden: true,
-        src: "",
-        addEventListener(type, _listener, options) {
-          assert.equal(type, "load");
-          assert.deepEqual(options, { once: true });
-        },
-      };
-      const errorPanel = { hidden: true };
-      const errorMessage = { textContent: "" };
-      let objectUrlCalls = 0;
-
-      const result = await bootViewer({
-        search: `?file=${encodeURIComponent("file:///tmp/book.pdf")}`,
-        fetchPdf: testCase.fetchPdf,
-        createObjectUrl() {
-          objectUrlCalls += 1;
-        },
-        isFileSchemeAccessAllowed: async () => true,
-        pdfJsViewerUrl: new URL(
-          "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
-        ),
-        view: createViewerView({ frame, errorPanel, errorMessage }),
-      });
-
-      assert.equal(result, undefined);
-      assert.equal(objectUrlCalls, 0);
-      assert.equal(frame.hidden, true);
-      assert.equal(
-        frame.src,
-        "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
-      );
-      assert.equal(errorPanel.hidden, false);
-      assert.equal(errorMessage.textContent, testCase.message);
-    });
-  }
+  assert.equal(result, undefined);
+  assert.deepEqual(shownViewers, [
+    "chrome-extension://abcdefghijkl/viewer/pdfjs/web/viewer.html",
+  ]);
+  assert.deepEqual(errors, [
+    "The local PDF could not be read. Verify that the file still exists and can be opened.",
+  ]);
 });
 
 test("viewer view adapter presents step-by-step file access instructions", async () => {

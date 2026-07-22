@@ -111,10 +111,6 @@ export async function startViewerApp({
   const frame = /** @type {PdfJsFrame} */ (
     hostDocument.querySelector("#pdfViewer")
   );
-  installViewerStartupPrototypeMeasurements(frame, {
-    performance: hostWindow.performance,
-    target: hostWindow,
-  });
   const view = createView({
     errorPanel: /** @type {HTMLElement} */ (
       hostDocument.querySelector("#viewerError")
@@ -133,6 +129,16 @@ export async function startViewerApp({
       hostDocument.querySelector("#viewerWarningMessage")
     ),
   });
+  if (createView === createViewerView) {
+    const showViewer = view.showViewer;
+    view.showViewer = (viewerUrl) => {
+      installViewerStartupPrototypeMeasurements(frame, {
+        performance: hostWindow.performance,
+        target: hostWindow,
+      });
+      showViewer(viewerUrl);
+    };
+  }
   const viewer = await bootViewerOperation({
     search: hostWindow.location.search,
     fetchPdf,
@@ -170,7 +176,9 @@ export async function startViewerApp({
         try {
           positionTracking?.destroy();
         } finally {
-          revokeObjectUrl(activeViewer.objectUrl);
+          if (activeViewer.objectUrl) {
+            revokeObjectUrl(activeViewer.objectUrl);
+          }
         }
       }
     }
