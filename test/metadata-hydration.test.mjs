@@ -412,15 +412,16 @@ test("metadata hydration serializes with concurrent position and rename updates"
     totalPages: 7,
   });
   await heldWrite.started;
-  const positionWrite = positionStore.updatePositionObservation(
+  const positionWrite = positionStore.recordObservation(
     BOOK_URL,
     { currentPage: 4, scrollTop: 700 },
     {
+      intent: "registered",
       viewerId: "0".repeat(32),
       sequence: 1,
       observedAt: 1_800_000_000_000,
+      trackingGeneration: "1".repeat(32),
     },
-    "1".repeat(32),
   );
   const renameWrite = renameStore.updateCustomTitle(BOOK_URL, "Renamed");
   heldWrite.release();

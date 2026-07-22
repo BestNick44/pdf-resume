@@ -12,7 +12,7 @@ import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
 
 /** @typedef {import("../types/pdfjs.d.ts").PdfJsFrame} PdfJsFrame */
-/** @typedef {import("../types/storage.d.ts").PendingPositionHandoffMessage | import("../types/storage.d.ts").UpdatePositionMessage} PositionMutationMessage */
+/** @typedef {import("../types/storage.d.ts").RecordObservationMessage} RecordObservationMessage */
 
 /**
  * @typedef {{
@@ -60,7 +60,7 @@ const STARTUP_ERROR =
  *   createObjectUrl?: (blob: Blob) => string,
  *   revokeObjectUrl?: (url: string) => void,
  *   isFileSchemeAccessAllowed?: () => boolean | Promise<boolean>,
- *   sendMessage?: (message: PositionMutationMessage) => unknown,
+ *   sendMessage?: (message: RecordObservationMessage) => unknown,
  *   getBookOperation?: typeof getBook,
  *   getPositionTrackingStateOperation?: typeof getPositionTrackingState,
  *   hydrateMetadataOperation?: typeof hydrateMetadata,
@@ -193,9 +193,7 @@ export async function startViewerApp({
       hostDocument,
       clock: positionTrackingClock,
       getPositionTrackingState: getPositionTrackingStateOperation,
-      updatePosition: positionUpdates.updatePosition,
-      handoffPendingPosition: positionUpdates.handoffPendingPosition,
-      handoffPosition: positionUpdates.handoffPosition,
+      recordObservation: positionUpdates.recordObservation,
       reportError(error) {
         view.showWarning(RESTORE_WARNING, error);
       },

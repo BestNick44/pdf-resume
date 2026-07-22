@@ -21,6 +21,17 @@ const BLOB_URL = "blob:chrome-extension://abcdefghijkl/document-id";
 const OBSERVATION_START = 1_750_000_000_000;
 const TEST_TRACKING_GENERATION = "0".repeat(32);
 
+function registeredObservation(
+  observation,
+  trackingGeneration = TEST_TRACKING_GENERATION,
+) {
+  return { ...observation, intent: "registered", trackingGeneration };
+}
+
+function pendingObservation(observation) {
+  return { ...observation, intent: "pending" };
+}
+
 function canonicalRecord(overrides = {}) {
   return {
     title: "A Book",
@@ -69,12 +80,11 @@ function createController({
   const controller = createPositionSaveController({
     fileUrl: BOOK_URL,
     initialPosition,
-    updatePosition(fileUrl, position, observation) {
+    recordObservation(fileUrl, position, observation) {
       return updateOperation(
         fileUrl,
         position,
-        observation,
-        trackingGeneration,
+        registeredObservation(observation, trackingGeneration),
       );
     },
     scheduler: time.scheduler,
@@ -158,12 +168,10 @@ function createPdfJsHarness({
   createSaveController,
   getBook = async () => canonicalRecord(),
   getPositionTrackingState,
-  handoffPendingPosition = () => {},
-  handoffPosition = () => {},
   initialReadRetryDelays,
+  recordObservation,
   reportError,
   restorePosition,
-  updatePosition,
 } = {}) {
   const time = createFakeScheduler(OBSERVATION_START);
   const hostDocument = new FakeEventTarget();
@@ -219,17 +227,15 @@ function createPdfJsHarness({
     createRestoreLifecycle,
     createSaveController,
     getPositionTrackingState: readPositionState,
-    handoffPendingPosition,
-    handoffPosition,
     initialReadRetryDelays,
-    reportError: reportError ?? ((error) => errors.push(error)),
-    restorePosition,
-    updatePosition:
-      updatePosition ??
+    recordObservation:
+      recordObservation ??
       (async (fileUrl, position) => {
         calls.push({ fileUrl, position });
         return { ...canonicalRecord(), ...position };
       }),
+    reportError: reportError ?? ((error) => errors.push(error)),
+    restorePosition,
     scheduler: time.scheduler,
     clock: clock ?? time.clock,
   });
@@ -758,7 +764,7 @@ test("tracked canonical position restores without an initialization write or han
       reads.push(fileUrl);
       return saved;
     },
-    handoffPosition(fileUrl, position) {
+    recordObservation(fileUrl, position) {
       handoffs.push({ fileUrl, position });
     },
   });
@@ -994,7 +1000,7 @@ test("pagehide during restore hands off only a genuine changed position", async 
     const handoffs = [];
     const harness = createPdfJsHarness({
       getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
-      handoffPosition(fileUrl, position, observation) {
+      recordObservation(fileUrl, position, observation) {
         handoffs.push({ fileUrl, observation, position });
       },
     });
@@ -1032,7 +1038,7 @@ test("pagehide during restore hands off only a genuine changed position", async 
     const handoffs = [];
     const harness = createPdfJsHarness({
       getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
-      handoffPosition(...args) {
+      recordObservation(...args) {
         handoffs.push(args);
       },
     });
@@ -1049,7 +1055,7 @@ test("pagehide during restore hands off only a genuine changed position", async 
     const handoffs = [];
     const harness = createPdfJsHarness({
       getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
-      handoffPosition(...args) {
+      recordObservation(...args) {
         handoffs.push(args);
       },
     });
@@ -1087,16 +1093,13 @@ test("pagehide pending handoff is restricted to an in-flight viewer registration
     });
     const handler = createPositionUpdateMessageHandler({
       extensionId: "abcdefghijkl",
-      updatePendingPositionObservation:
-        storage.updatePendingPositionObservation,
-      updatePositionObservation: storage.updatePositionObservation,
+      recordObservation: storage.recordObservation,
     });
     const bridge = createMessageBridge(handler);
     const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
     const harness = createPdfJsHarness({
       getPositionTrackingState: storage.getPositionTrackingState,
-      handoffPendingPosition: client.handoffPendingPosition,
-      handoffPosition: client.handoffPosition,
+      recordObservation: client.recordObservation,
     });
     await harness.begin();
     await registrationWrite.started;
@@ -1127,10 +1130,14 @@ test("pagehide pending handoff is restricted to an in-flight viewer registration
     assert.deepEqual(bookBeforeRelease, existing, "the handoff must queue behind registration");
     assert.equal(
       messagesBeforeRelease[0].type,
-      "pdf-resume/private/handoff-pending-position",
+      "pdf-resume/private/record-observation",
     );
+    assert.equal(messagesBeforeRelease[0].observation.intent, "pending");
     assert.equal(messagesBeforeRelease[0].observation.viewerId, registeredViewer);
-    assert.equal(Object.hasOwn(messagesBeforeRelease[0], "trackingGeneration"), false);
+    assert.equal(
+      Object.hasOwn(messagesBeforeRelease[0].observation, "trackingGeneration"),
+      false,
+    );
     assert.deepEqual(responses, [
       {
         type: "pdf-resume/private/update-position-result",
@@ -1155,8 +1162,7 @@ test("pagehide pending handoff is restricted to an in-flight viewer registration
       getBook: async () => {
         throw new Error("storage temporarily unavailable");
       },
-      handoffPendingPosition: recordHandoff,
-      handoffPosition: recordHandoff,
+      recordObservation: recordHandoff,
       initialReadRetryDelays: [1_000],
     });
     await harness.begin();
@@ -1180,8 +1186,7 @@ test("pagehide pending handoff is restricted to an in-flight viewer registration
       const recordHandoff = (...args) => handoffs.push(args);
       const harness = createPdfJsHarness({
         getBook: () => bookRead.promise,
-        handoffPendingPosition: recordHandoff,
-        handoffPosition: recordHandoff,
+        recordObservation: recordHandoff,
       });
       await harness.begin();
       if (programmaticChange) {
@@ -1204,8 +1209,7 @@ test("pagehide pending handoff is restricted to an in-flight viewer registration
     const recordHandoff = (...args) => handoffs.push(args);
     const harness = createPdfJsHarness({
       getBook: async () => undefined,
-      handoffPendingPosition: recordHandoff,
-      handoffPosition: recordHandoff,
+      recordObservation: recordHandoff,
     });
     await harness.begin();
     await harness.tracking.settled();
@@ -1225,7 +1229,7 @@ test("pagehide pending handoff is restricted to an in-flight viewer registration
 test("restore lifecycle is retired on replacement without arming or handing off", async () => {
   const handoffs = [];
   const harness = createPdfJsHarness({
-    handoffPosition(...args) {
+    recordObservation(...args) {
       handoffs.push(args);
     },
   });
@@ -1277,7 +1281,7 @@ test("restore rejection preserves boundary activity for immediate pagehide hando
       return createPositionSaveController(options);
     },
     getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
-    handoffPosition(fileUrl, position, observation) {
+    recordObservation(fileUrl, position, observation) {
       handoffs.push({ fileUrl, observation, position });
     },
     async restorePosition({ application, container, eventBus }) {
@@ -1343,7 +1347,7 @@ test("restore rejection does not persist restore-owned movement", async () => {
   const handoffs = [];
   const harness = createPdfJsHarness({
     getBook: async () => canonicalRecord({ currentPage: 4, scrollTop: 400 }),
-    handoffPosition(...args) {
+    recordObservation(...args) {
       handoffs.push(args);
     },
     async restorePosition({ application, container, eventBus }) {
@@ -1518,9 +1522,11 @@ test("untracked and missing records never register position listeners or create 
 
 test("pagehide hands off synchronously while hidden visibility uses the ordered save path", async () => {
   const handoffs = [];
+  const saves = [];
   const harness = createPdfJsHarness({
-    handoffPosition(fileUrl, position) {
-      handoffs.push({ fileUrl, position });
+    recordObservation(fileUrl, position, observation, { handoff = false } = {}) {
+      (handoff ? handoffs : saves).push({ fileUrl, observation, position });
+      return handoff ? undefined : Promise.resolve(position);
     },
   });
   await harness.ready();
@@ -1529,12 +1535,15 @@ test("pagehide hands off synchronously while hidden visibility uses the ordered 
   harness.container.scrollTop = 810;
   harness.eventBus.dispatch("pagechanging", { source: harness.application.pdfViewer });
   harness.tracking.handoff();
-  assert.deepEqual(handoffs, [
-    {
-      fileUrl: BOOK_URL,
-      position: { currentPage: 8, scrollTop: 810 },
-    },
-  ]);
+  assert.deepEqual(
+    handoffs.map(({ fileUrl, position }) => ({ fileUrl, position })),
+    [
+      {
+        fileUrl: BOOK_URL,
+        position: { currentPage: 8, scrollTop: 810 },
+      },
+    ],
+  );
   assert.deepEqual(harness.calls, []);
 
   harness.application.pdfViewer.currentPageNumber = 9;
@@ -1544,7 +1553,10 @@ test("pagehide hands off synchronously while hidden visibility uses the ordered 
   harness.hostDocument.dispatch("visibilitychange");
   await harness.tracking.settled();
 
-  assert.deepEqual(harness.calls.map(({ position }) => position), [
+  assert.deepEqual(handoffs.map(({ position }) => position), [
+    { currentPage: 8, scrollTop: 810 },
+  ]);
+  assert.deepEqual(saves.map(({ position }) => position), [
     { currentPage: 9, scrollTop: 920 },
   ]);
   harness.tracking.destroy();
@@ -1553,7 +1565,7 @@ test("pagehide hands off synchronously while hidden visibility uses the ordered 
 test("pagesdestroy retirement preserves a failed flush through its scheduled retry", async () => {
   const attempts = [];
   const harness = createPdfJsHarness({
-    async updatePosition(fileUrl, position, observation) {
+    async recordObservation(fileUrl, position, observation) {
       attempts.push({ fileUrl, observation, position });
       if (attempts.length === 1) {
         throw new Error("storage temporarily unavailable");
@@ -1616,7 +1628,7 @@ test(
           },
         });
       },
-      async updatePosition(fileUrl, position, observation) {
+      async recordObservation(fileUrl, position, observation) {
         attempts.push({ fileUrl, observation, position });
         throw new Error("storage unavailable");
       },
@@ -1683,7 +1695,7 @@ test("pagesdestroy retirement exhausts bounded retries and releases its controll
         },
       });
     },
-    async updatePosition(fileUrl, position, observation) {
+    async recordObservation(fileUrl, position, observation) {
       attempts.push({ fileUrl, observation, position });
       throw new Error("storage unavailable");
     },
@@ -1722,7 +1734,7 @@ test(
   async () => {
     const retirementWrite = deferred();
     const harness = createPdfJsHarness({
-      updatePosition: () => retirementWrite.promise,
+      recordObservation: () => retirementWrite.promise,
     });
     await harness.ready();
 
@@ -1777,7 +1789,7 @@ test("replacement events enter only the new controller while the old controller 
       };
       startTracking(currentPosition, currentPosition);
     },
-    async updatePosition(fileUrl, position, observation) {
+    async recordObservation(fileUrl, position, observation) {
       attempts.push({ fileUrl, observation, position });
       if (attempts.length === 1) {
         throw new Error("storage temporarily unavailable");
@@ -1865,13 +1877,12 @@ test("an older observation delayed in one viewer cannot overwrite a newer viewer
   });
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: storage.updatePendingPositionObservation,
-    updatePositionObservation: storage.updatePositionObservation,
+    recordObservation: storage.recordObservation,
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
-  const viewerA = createController({ update: client.updatePosition });
-  const viewerB = createController({ update: client.updatePosition });
+  const viewerA = createController({ update: client.recordObservation });
+  const viewerB = createController({ update: client.recordObservation });
 
   viewerA.controller.observe({ currentPage: 2, scrollTop: 200 });
   viewerB.time.advanceBy(100);
@@ -1912,19 +1923,18 @@ test("an older failed observation keeps its order through retry and cannot regre
   let firstAttempt = true;
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: storage.updatePendingPositionObservation,
-    async updatePositionObservation(...args) {
+    async recordObservation(...args) {
       if (firstAttempt) {
         firstAttempt = false;
         throw new Error("worker write failed");
       }
-      return storage.updatePositionObservation(...args);
+      return storage.recordObservation(...args);
     },
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
-  const viewerA = createController({ update: client.updatePosition });
-  const viewerB = createController({ update: client.updatePosition });
+  const viewerA = createController({ update: client.recordObservation });
+  const viewerB = createController({ update: client.recordObservation });
 
   viewerA.controller.observe({ currentPage: 2, scrollTop: 200 });
   viewerA.time.advanceBy(1_000);
@@ -1954,8 +1964,8 @@ test("an older failed observation keeps its order through retry and cannot regre
     "retry must retain the original observation order",
   );
   assert.equal(
-    bridge.messages[0].trackingGeneration,
-    bridge.messages[2].trackingGeneration,
+    bridge.messages[0].observation.trackingGeneration,
+    bridge.messages[2].observation.trackingGeneration,
     "retry must retain the original tracking generation",
   );
 });
@@ -1971,24 +1981,28 @@ test("same-viewer sequence orders equal-time messages independently of receipt",
   });
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: storage.updatePendingPositionObservation,
-    updatePositionObservation: storage.updatePositionObservation,
-    now: () => OBSERVATION_START + 1_000,
+    recordObservation: storage.recordObservation,
   });
   const viewerId = "a".repeat(32);
   const older = {
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage: 4, scrollTop: 400 },
-    observation: { viewerId, sequence: 1, observedAt: OBSERVATION_START },
+    observation: registeredObservation({
+      viewerId,
+      sequence: 1,
+      observedAt: OBSERVATION_START,
+    }),
   };
   const newer = {
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage: 5, scrollTop: 500 },
-    observation: { viewerId, sequence: 2, observedAt: OBSERVATION_START },
+    observation: registeredObservation({
+      viewerId,
+      sequence: 2,
+      observedAt: OBSERVATION_START,
+    }),
   };
   const bridge = createMessageBridge(handler);
 
@@ -2020,18 +2034,15 @@ test("same-viewer sequence wins across wall-clock rollback before and after work
     createMessageBridge(
       createPositionUpdateMessageHandler({
         extensionId: "abcdefghijkl",
-        updatePendingPositionObservation:
-          storage.updatePendingPositionObservation,
-        updatePositionObservation: storage.updatePositionObservation,
+        recordObservation: storage.recordObservation,
         now: () => OBSERVATION_START + 10_000,
       }),
     );
   const message = (currentPage, sequence, observedAt) => ({
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage, scrollTop: currentPage * 100 },
-    observation: { viewerId, sequence, observedAt },
+    observation: registeredObservation({ viewerId, sequence, observedAt }),
   });
   const firstWorker = createWorker();
 
@@ -2096,19 +2107,20 @@ test("a higher known-viewer sequence survives receiver clock rollback while an u
   const bridge = createMessageBridge(
     createPositionUpdateMessageHandler({
       extensionId: "abcdefghijkl",
-      updatePendingPositionObservation:
-        storage.updatePendingPositionObservation,
-      updatePositionObservation: storage.updatePositionObservation,
+      recordObservation: storage.recordObservation,
       now: () => receiverNow,
     }),
   );
   const viewerId = "1".repeat(32);
   const message = (currentPage, sequence, observedAt, messageViewerId = viewerId) => ({
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage, scrollTop: currentPage * 100 },
-    observation: { viewerId: messageViewerId, sequence, observedAt },
+    observation: registeredObservation({
+      viewerId: messageViewerId,
+      sequence,
+      observedAt,
+    }),
   });
 
   assert.equal((await bridge.sendMessage(message(10, 10, 100_000))).status, "updated");
@@ -2143,8 +2155,7 @@ test("a fresh registered viewer's first save survives receiver clock rollback", 
 
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: storage.updatePendingPositionObservation,
-    updatePositionObservation: storage.updatePositionObservation,
+    recordObservation: storage.recordObservation,
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
@@ -2156,7 +2167,7 @@ test("a fresh registered viewer's first save survives receiver clock rollback", 
     initialPosition: trackingState.book,
     observationSource,
     trackingGeneration: trackingState.trackingGeneration,
-    update: client.updatePosition,
+    update: client.recordObservation,
   });
 
   controller.observe({ currentPage: 2, scrollTop: 200 });
@@ -2192,18 +2203,15 @@ test("durable per-viewer order makes the rollback A/B/A cycle stale after restar
     createMessageBridge(
       createPositionUpdateMessageHandler({
         extensionId: "abcdefghijkl",
-        updatePendingPositionObservation:
-          storage.updatePendingPositionObservation,
-        updatePositionObservation: storage.updatePositionObservation,
+        recordObservation: storage.recordObservation,
         now: () => 2_000_000,
       }),
     );
   const message = (viewerId, sequence, observedAt, currentPage) => ({
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage, scrollTop: currentPage * 100 },
-    observation: { viewerId, sequence, observedAt },
+    observation: registeredObservation({ viewerId, sequence, observedAt }),
   });
   const viewerA = "a".repeat(32);
   const viewerB = "b".repeat(32);
@@ -2248,17 +2256,14 @@ test("lower and duplicate viewer sequences stay stale after other viewers and re
     createMessageBridge(
       createPositionUpdateMessageHandler({
         extensionId: "abcdefghijkl",
-        updatePendingPositionObservation:
-          storage.updatePendingPositionObservation,
-        updatePositionObservation: storage.updatePositionObservation,
+        recordObservation: storage.recordObservation,
       }),
     );
   const message = (viewerId, sequence, observedAt, currentPage) => ({
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage, scrollTop: currentPage * 100 },
-    observation: { viewerId, sequence, observedAt },
+    observation: registeredObservation({ viewerId, sequence, observedAt }),
   });
   const viewerA = "3".repeat(32);
   const firstWorker = createWorker();
@@ -2321,23 +2326,20 @@ test("worker restart retains the full durable observation order within one secon
   const createHandler = () =>
     createPositionUpdateMessageHandler({
       extensionId: "abcdefghijkl",
-      updatePendingPositionObservation:
-        storage.updatePendingPositionObservation,
-      updatePositionObservation: storage.updatePositionObservation,
+      recordObservation: storage.recordObservation,
       now: () => OBSERVATION_START + 10_000,
     });
   const durableObservation = OBSERVATION_START + 2_100;
   const firstWorker = createMessageBridge(createHandler());
   await firstWorker.sendMessage({
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage: 8, scrollTop: 800 },
-    observation: {
+    observation: registeredObservation({
       viewerId: "b".repeat(32),
       sequence: 1,
       observedAt: durableObservation,
-    },
+    }),
   });
 
   const writesBeforeRestart = fake.operations.filter(
@@ -2346,15 +2348,14 @@ test("worker restart retains the full durable observation order within one secon
   const restartedWorker = createMessageBridge(createHandler());
   assert.deepEqual(
     await restartedWorker.sendMessage({
-      type: "pdf-resume/private/update-position",
-      trackingGeneration: TEST_TRACKING_GENERATION,
+      type: "pdf-resume/private/record-observation",
       fileUrl: BOOK_URL,
       position: { currentPage: 2, scrollTop: 200 },
-      observation: {
+      observation: registeredObservation({
         viewerId: "a".repeat(32),
         sequence: 1,
         observedAt: OBSERVATION_START + 2_000,
-      },
+      }),
     }),
     {
       type: "pdf-resume/private/update-position-result",
@@ -2390,15 +2391,14 @@ test("worker restart retains the full durable observation order within one secon
   });
 
   await restartedWorker.sendMessage({
-    type: "pdf-resume/private/update-position",
-    trackingGeneration: TEST_TRACKING_GENERATION,
+    type: "pdf-resume/private/record-observation",
     fileUrl: BOOK_URL,
     position: { currentPage: 3, scrollTop: 300 },
-    observation: {
+    observation: registeredObservation({
       viewerId: "c".repeat(32),
       sequence: 1,
       observedAt: OBSERVATION_START + 2_900,
-    },
+    }),
   });
   assert.deepEqual(
     {
@@ -2428,14 +2428,13 @@ test("pagehide handoff queues behind an older worker write and wins without a du
   });
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: storage.updatePendingPositionObservation,
-    updatePositionObservation: async (...args) => {
+    recordObservation: async (...args) => {
       const [fileUrl, position, observation] = args;
       workerCalls.push({ fileUrl, observation, position });
       if (workerCalls.length === 1) {
         await firstWrite.promise;
       }
-      const status = await storage.updatePositionObservation(...args);
+      const status = await storage.recordObservation(...args);
       completedPositions.push(position);
       return status;
     },
@@ -2443,8 +2442,7 @@ test("pagehide handoff queues behind an older worker write and wins without a du
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
   const harness = createPdfJsHarness({
-    handoffPosition: client.handoffPosition,
-    updatePosition: client.updatePosition,
+    recordObservation: client.recordObservation,
   });
   await harness.ready();
 
@@ -2517,21 +2515,19 @@ test("pagehide hands off a return to the durable baseline over an older in-fligh
   });
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: storage.updatePendingPositionObservation,
-    updatePositionObservation: async (...args) => {
+    recordObservation: async (...args) => {
       const [fileUrl, position, observation] = args;
       workerCalls.push({ fileUrl, observation, position });
       if (workerCalls.length === 1) {
         await firstWrite.promise;
       }
-      return storage.updatePositionObservation(...args);
+      return storage.recordObservation(...args);
     },
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
   const harness = createPdfJsHarness({
-    handoffPosition: client.handoffPosition,
-    updatePosition: client.updatePosition,
+    recordObservation: client.recordObservation,
   });
   await harness.ready();
 
@@ -2583,6 +2579,46 @@ test("a durable baseline with no older pending save emits no handoff", async () 
   controller.destroy();
 });
 
+test("worker messaging rejects missing and unknown observation intents", () => {
+  let recordCalls = 0;
+  const handler = createPositionUpdateMessageHandler({
+    extensionId: "abcdefghijkl",
+    async recordObservation() {
+      recordCalls += 1;
+      return "updated";
+    },
+  });
+
+  for (const intent of [undefined, "unknown"]) {
+    let response;
+    assert.equal(
+      handler(
+        {
+          type: "pdf-resume/private/record-observation",
+          fileUrl: BOOK_URL,
+          position: { currentPage: 2, scrollTop: 20 },
+          observation: {
+            viewerId: "d".repeat(32),
+            sequence: 1,
+            observedAt: OBSERVATION_START,
+            ...(intent === undefined ? {} : { intent }),
+          },
+        },
+        { id: "abcdefghijkl" },
+        (result) => {
+          response = result;
+        },
+      ),
+      false,
+    );
+    assert.deepEqual(response, {
+      type: "pdf-resume/private/update-position-result",
+      status: "invalid",
+    });
+  }
+  assert.equal(recordCalls, 0);
+});
+
 test("worker messaging validates private canonical updates and never creates an untracked book", async () => {
   const fake = createChromeStorageFake();
   const storage = createBooksStorage({
@@ -2594,15 +2630,14 @@ test("worker messaging validates private canonical updates and never creates an 
   let updateCalls = 0;
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    async updatePendingPositionObservation(...args) {
-      pendingUpdateCalls += 1;
-      return storage.updatePendingPositionObservation(...args);
+    async recordObservation(...args) {
+      if (args[2].intent === "pending") {
+        pendingUpdateCalls += 1;
+      } else {
+        updateCalls += 1;
+      }
+      return storage.recordObservation(...args);
     },
-    updatePositionObservation: async (...args) => {
-      updateCalls += 1;
-      return storage.updatePositionObservation(...args);
-    },
-    now: () => OBSERVATION_START + 10_000,
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
@@ -2613,11 +2648,10 @@ test("worker messaging validates private canonical updates and never creates an 
   const firstObservation = observations.next();
 
   assert.equal(
-    await client.updatePosition(
+    await client.recordObservation(
       BOOK_URL,
       { currentPage: 2, scrollTop: 20 },
-      firstObservation,
-      TEST_TRACKING_GENERATION,
+      registeredObservation(firstObservation),
     ),
     undefined,
   );
@@ -2625,10 +2659,10 @@ test("worker messaging validates private canonical updates and never creates an 
   assert.equal(updateCalls, 1);
   assert.deepEqual(
     await bridge.sendMessage({
-      type: "pdf-resume/private/handoff-pending-position",
+      type: "pdf-resume/private/record-observation",
       fileUrl: BOOK_URL,
       position: { currentPage: 2, scrollTop: 20 },
-      observation: firstObservation,
+      observation: pendingObservation(firstObservation),
     }),
     {
       type: "pdf-resume/private/update-position-result",
@@ -2645,88 +2679,90 @@ test("worker messaging validates private canonical updates and never creates an 
     },
   });
   await assert.rejects(
-    rejectingClient.updatePosition(
+    rejectingClient.recordObservation(
       BOOK_URL,
       {
         currentPage: 2,
         scrollTop: 20,
         unexpected: true,
       },
-      firstObservation,
-      TEST_TRACKING_GENERATION,
+      registeredObservation(firstObservation),
     ),
     /exactly the supported fields/i,
   );
   await assert.rejects(
-    rejectingClient.updatePosition(
+    rejectingClient.recordObservation(
       "file:///Users/reader/Books/A Book.pdf",
       { currentPage: 2, scrollTop: 20 },
-      firstObservation,
-      TEST_TRACKING_GENERATION,
+      registeredObservation(firstObservation),
     ),
     /canonical/i,
   );
   for (const invalidObservation of [
     undefined,
     {},
-    { ...firstObservation, viewerId: "not-an-id" },
-    { ...firstObservation, sequence: 0 },
-    { ...firstObservation, observedAt: 1.5 },
-    { ...firstObservation, extra: true },
+    firstObservation,
+    registeredObservation({ ...firstObservation, viewerId: "not-an-id" }),
+    registeredObservation({ ...firstObservation, sequence: 0 }),
+    registeredObservation({ ...firstObservation, observedAt: 1.5 }),
+    { ...registeredObservation(firstObservation), extra: true },
+    { ...firstObservation, intent: "registered" },
+    { ...pendingObservation(firstObservation), trackingGeneration: TEST_TRACKING_GENERATION },
   ]) {
     await assert.rejects(
-      rejectingClient.updatePosition(
+      rejectingClient.recordObservation(
         BOOK_URL,
         { currentPage: 2, scrollTop: 20 },
         invalidObservation,
-        TEST_TRACKING_GENERATION,
       ),
-      /position observation/i,
+      /position observation|tracking generation/i,
     );
   }
   assert.equal(sendCalls, 0);
 
   const invalidMessages = [
     {
-      type: "pdf-resume/private/update-position",
-      trackingGeneration: TEST_TRACKING_GENERATION,
+      type: "pdf-resume/private/record-observation",
       fileUrl: "https://example.test/book.pdf",
       position: { currentPage: 2, scrollTop: 20 },
-      observation: firstObservation,
+      observation: registeredObservation(firstObservation),
     },
     {
-      type: "pdf-resume/private/update-position",
+      type: "pdf-resume/private/record-observation",
       fileUrl: BOOK_URL,
       position: { currentPage: 2, scrollTop: 20 },
       observation: firstObservation,
     },
     {
-      type: "pdf-resume/private/update-position",
-      trackingGeneration: TEST_TRACKING_GENERATION,
+      type: "pdf-resume/private/record-observation",
       fileUrl: BOOK_URL,
       position: { currentPage: 2, scrollTop: 20 },
-      observation: firstObservation,
+      observation: registeredObservation(firstObservation),
       extra: true,
     },
     {
-      type: "pdf-resume/private/update-position",
-      trackingGeneration: "not-a-generation",
+      type: "pdf-resume/private/record-observation",
       fileUrl: BOOK_URL,
       position: { currentPage: 2, scrollTop: 20 },
-      observation: firstObservation,
+      observation: registeredObservation(
+        firstObservation,
+        "not-a-generation",
+      ),
     },
     {
-      type: "pdf-resume/private/handoff-pending-position",
-      trackingGeneration: TEST_TRACKING_GENERATION,
+      type: "pdf-resume/private/record-observation",
       fileUrl: BOOK_URL,
       position: { currentPage: 2, scrollTop: 20 },
-      observation: firstObservation,
+      observation: {
+        ...pendingObservation(firstObservation),
+        trackingGeneration: TEST_TRACKING_GENERATION,
+      },
     },
     {
-      type: "pdf-resume/private/handoff-pending-position",
+      type: "pdf-resume/private/record-observation",
       fileUrl: "https://example.test/book.pdf",
       position: { currentPage: 2, scrollTop: 20 },
-      observation: firstObservation,
+      observation: pendingObservation(firstObservation),
     },
   ];
   for (const message of invalidMessages) {
@@ -2750,10 +2786,10 @@ test("worker messaging validates private canonical updates and never creates an 
   const beforeUnregisteredHandoff = fake.snapshot();
   assert.deepEqual(
     await bridge.sendMessage({
-      type: "pdf-resume/private/handoff-pending-position",
+      type: "pdf-resume/private/record-observation",
       fileUrl: BOOK_URL,
       position: { currentPage: 9, scrollTop: 90 },
-      observation: firstObservation,
+      observation: pendingObservation(firstObservation),
     }),
     {
       type: "pdf-resume/private/update-position-result",
@@ -2768,11 +2804,13 @@ test("worker messaging validates private canonical updates and never creates an 
     observations.viewerId,
   );
   assert.deepEqual(
-    await client.updatePosition(
+    await client.recordObservation(
       BOOK_URL,
       { currentPage: 3, scrollTop: 30 },
-      observations.next(),
-      trackingState.trackingGeneration,
+      registeredObservation(
+        observations.next(),
+        trackingState.trackingGeneration,
+      ),
     ),
     { currentPage: 3, scrollTop: 30 },
     "invalid and missing updates must not poison a later retrack",
@@ -2798,11 +2836,13 @@ test("worker messaging validates private canonical updates and never creates an 
   assert.equal(
     handler(
       {
-        type: "pdf-resume/private/update-position",
-        trackingGeneration: trackingState.trackingGeneration,
+        type: "pdf-resume/private/record-observation",
         fileUrl: BOOK_URL,
         position: { currentPage: 2, scrollTop: 20 },
-        observation: firstObservation,
+        observation: registeredObservation(
+          firstObservation,
+          trackingState.trackingGeneration,
+        ),
       },
       { id: "another-extension" },
       (response) => {
@@ -2837,18 +2877,19 @@ test("worker messaging validates private canonical updates and never creates an 
   ];
   for (const failedClient of failedHandoffs) {
     assert.doesNotThrow(() =>
-      failedClient.handoffPendingPosition(
+      failedClient.recordObservation(
         BOOK_URL,
         { currentPage: 2, scrollTop: 20 },
-        firstObservation,
+        pendingObservation(firstObservation),
+        { handoff: true },
       ),
     );
     assert.doesNotThrow(() =>
-      failedClient.handoffPosition(
+      failedClient.recordObservation(
         BOOK_URL,
         { currentPage: 2, scrollTop: 20 },
-        firstObservation,
-        TEST_TRACKING_GENERATION,
+        registeredObservation(firstObservation),
+        { handoff: true },
       ),
     );
   }
@@ -3150,8 +3191,7 @@ test("production composition wires canonical boot, actual tracking, worker hando
   const workerCalls = [];
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: async () => "stale",
-    updatePositionObservation: async (fileUrl, position) => {
+    recordObservation: async (fileUrl, position) => {
       workerCalls.push({ fileUrl, position });
       return "updated";
     },
@@ -3305,14 +3345,13 @@ test("actual tracking saves page 8 against stale total 7 without clobbering book
   });
   const handler = createPositionUpdateMessageHandler({
     extensionId: "abcdefghijkl",
-    updatePendingPositionObservation: storage.updatePendingPositionObservation,
-    updatePositionObservation: storage.updatePositionObservation,
+    recordObservation: storage.recordObservation,
   });
   const bridge = createMessageBridge(handler);
   const client = createPositionUpdateClient({ sendMessage: bridge.sendMessage });
   const { controller } = createController({
     initialPosition: existing,
-    update: client.updatePosition,
+    update: client.recordObservation,
   });
 
   controller.observe({ currentPage: 8, scrollTop: 808 });

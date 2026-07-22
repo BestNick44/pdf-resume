@@ -10,7 +10,7 @@ import {
   removeBook,
   trackBook,
   updateCustomTitle,
-  updatePositionObservation,
+  recordObservation,
   upsertBook,
 } from "../storage/books.mjs";
 import { createChromeStorageFake } from "./support/chrome-storage-fake.mjs";
@@ -62,25 +62,26 @@ function assertEmptyCurrentOrder(order) {
   assert.deepEqual(order.viewers, {});
 }
 
+function registeredObservation(observation, trackingGeneration) {
+  return {
+    ...observation,
+    intent: "registered",
+    trackingGeneration:
+      arguments.length < 2 ? TEST_TRACKING_GENERATION : trackingGeneration,
+  };
+}
+
+function pendingObservation(observation) {
+  return { ...observation, intent: "pending" };
+}
+
 function createTestBooksStorage(fake, now = 1_800_000_000, dependencies = {}) {
-  const storage = createBooksStorage({
+  return createBooksStorage({
     storageArea: fake.local,
     lockManager: fake.locks,
     now: () => now,
     nowMilliseconds: () => now * 1_000 + 999,
     ...dependencies,
-  });
-  return Object.freeze({
-    ...storage,
-    updatePositionObservation(...args) {
-      const [fileUrl, patch, observation, trackingGeneration] = args;
-      return storage.updatePositionObservation(
-        fileUrl,
-        patch,
-        observation,
-        args.length < 4 ? TEST_TRACKING_GENERATION : trackingGeneration,
-      );
-    },
   });
 }
 
@@ -238,14 +239,14 @@ test("position observations preserve metadata and only advance position and last
   const books = createTestBooksStorage(fake);
 
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 13, scrollTop: 999.25 },
-      {
+      registeredObservation({
         viewerId: "1".repeat(32),
         sequence: 1,
         observedAt: 1_800_000_000_000,
-      },
+      }),
     ),
     "updated",
   );
@@ -273,14 +274,14 @@ test("position observations can advance beyond a stale known total without chang
   const books = createTestBooksStorage(fake);
 
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 8, scrollTop: 800 },
-      {
+      registeredObservation({
         viewerId: "2".repeat(32),
         sequence: 1,
         observedAt: 1_800_000_000_000,
-      },
+      }),
     ),
     "updated",
   );
@@ -301,11 +302,13 @@ test("position observations can patch one position field and keep timestamps mon
   const state = await books.getPositionTrackingState(BOOK_A, viewerId);
 
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { scrollTop: 0 },
-      { viewerId, sequence: 1, observedAt: 1_800_000_000_000 },
-      state.trackingGeneration,
+      registeredObservation(
+        { viewerId, sequence: 1, observedAt: 1_800_000_000_000 },
+        state.trackingGeneration,
+      ),
     ),
     "updated",
   );
@@ -333,10 +336,10 @@ test("observed position updates durably reject older same-second delivery", asyn
   const firstStore = createTestBooksStorage(fake, 1_800_000_000);
 
   assert.equal(
-    await firstStore.updatePositionObservation(
+    await firstStore.recordObservation(
       BOOK_A,
       { currentPage: 8, scrollTop: 800 },
-      newerObservation,
+      registeredObservation(newerObservation),
     ),
     "updated",
   );
@@ -347,10 +350,10 @@ test("observed position updates durably reject older same-second delivery", asyn
 
   const restartedStore = createTestBooksStorage(fake, 1_800_000_000);
   assert.equal(
-    await restartedStore.updatePositionObservation(
+    await restartedStore.recordObservation(
       BOOK_A,
       { currentPage: 3, scrollTop: 300 },
-      olderObservation,
+      registeredObservation(olderObservation),
     ),
     "stale",
   );
@@ -364,37 +367,37 @@ test("same-viewer sequence survives clock rollback and storage recreation", asyn
   const firstStore = createTestBooksStorage(fake, 1_800_000_000);
 
   assert.equal(
-    await firstStore.updatePositionObservation(
+    await firstStore.recordObservation(
       BOOK_A,
       { currentPage: 4, scrollTop: 400 },
-      { viewerId, sequence: 10, observedAt: 1_750_000_005_000 },
+      registeredObservation({ viewerId, sequence: 10, observedAt: 1_750_000_005_000 }),
     ),
     "updated",
   );
   assert.equal(
-    await firstStore.updatePositionObservation(
+    await firstStore.recordObservation(
       BOOK_A,
       { currentPage: 5, scrollTop: 500 },
-      { viewerId, sequence: 11, observedAt: 1_750_000_004_000 },
+      registeredObservation({ viewerId, sequence: 11, observedAt: 1_750_000_004_000 }),
     ),
     "updated",
   );
   assert.equal(fake.snapshot().books[BOOK_A].lastReadAt, 1_750_000_005);
   assert.equal(
-    await firstStore.updatePositionObservation(
+    await firstStore.recordObservation(
       BOOK_A,
       { currentPage: 2, scrollTop: 200 },
-      { viewerId, sequence: 10, observedAt: 1_750_000_006_000 },
+      registeredObservation({ viewerId, sequence: 10, observedAt: 1_750_000_006_000 }),
     ),
     "stale",
   );
 
   const restartedStore = createTestBooksStorage(fake, 1_800_000_000);
   assert.equal(
-    await restartedStore.updatePositionObservation(
+    await restartedStore.recordObservation(
       BOOK_A,
       { currentPage: 6, scrollTop: 600 },
-      { viewerId, sequence: 12, observedAt: 1_750_000_003_000 },
+      registeredObservation({ viewerId, sequence: 12, observedAt: 1_750_000_003_000 }),
     ),
     "updated",
   );
@@ -408,10 +411,10 @@ test("same-viewer sequence survives clock rollback and storage recreation", asyn
     { currentPage: 6, lastReadAt: 1_750_000_005, scrollTop: 600 },
   );
   assert.equal(
-    await restartedStore.updatePositionObservation(
+    await restartedStore.recordObservation(
       BOOK_A,
       { currentPage: 7, scrollTop: 700 },
-      { viewerId, sequence: 12, observedAt: 1_750_000_007_000 },
+      registeredObservation({ viewerId, sequence: 12, observedAt: 1_750_000_007_000 }),
     ),
     "stale",
   );
@@ -429,10 +432,10 @@ test("untracked updates install no order and remove plus retrack resets prior or
   };
 
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 8, scrollTop: 800 },
-      previousObservation,
+      registeredObservation(previousObservation),
     ),
     "missing",
   );
@@ -444,11 +447,10 @@ test("untracked updates install no order and remove plus retrack resets prior or
     previousObservation.viewerId,
   );
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 8, scrollTop: 800 },
-      previousObservation,
-      firstState.trackingGeneration,
+      registeredObservation(previousObservation, firstState.trackingGeneration),
     ),
     "updated",
   );
@@ -476,11 +478,10 @@ test("untracked updates install no order and remove plus retrack resets prior or
     firstState.trackingGeneration,
   );
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 2, scrollTop: 20 },
-      retrackedObservation,
-      retrackedState.trackingGeneration,
+      registeredObservation(retrackedObservation, retrackedState.trackingGeneration),
     ),
     "updated",
   );
@@ -506,11 +507,13 @@ test("an observation captured before remove and same-second retrack cannot mutat
   assert.equal(await books.removeBook(BOOK_A), true);
   await books.trackBook(BOOK_A, { title: "Retracked" });
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 9, scrollTop: 900 },
-      { viewerId: oldViewer, sequence: 1, observedAt: 1_001_100 },
-      oldState.trackingGeneration,
+      registeredObservation(
+        { viewerId: oldViewer, sequence: 1, observedAt: 1_001_100 },
+        oldState.trackingGeneration,
+      ),
     ),
     "stale",
   );
@@ -523,11 +526,13 @@ test("an observation captured before remove and same-second retrack cannot mutat
     oldState.trackingGeneration,
   );
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 2, scrollTop: 200 },
-      { viewerId: freshViewer, sequence: 1, observedAt: 1_001_900 },
-      freshState.trackingGeneration,
+      registeredObservation(
+        { viewerId: freshViewer, sequence: 1, observedAt: 1_001_900 },
+        freshState.trackingGeneration,
+      ),
     ),
     "updated",
   );
@@ -552,14 +557,14 @@ test("pending handoffs cannot register an unknown or pre-retrack viewer", async 
     const before = fake.snapshot();
 
     assert.equal(
-      await books.updatePendingPositionObservation(
+      await books.recordObservation(
         BOOK_A,
         { currentPage: 9, scrollTop: 900 },
-        {
+        pendingObservation({
           viewerId: "7".repeat(32),
           sequence: 1,
           observedAt: 1_000,
-        },
+        }),
       ),
       "stale",
     );
@@ -587,14 +592,14 @@ test("pending handoffs cannot register an unknown or pre-retrack viewer", async 
     ).length;
 
     assert.equal(
-      await books.updatePendingPositionObservation(
+      await books.recordObservation(
         BOOK_A,
         { currentPage: 9, scrollTop: 900 },
-        {
+        pendingObservation({
           viewerId: oldViewer,
           sequence: 1,
           observedAt: 1_001_100,
-        },
+        }),
       ),
       "stale",
     );
@@ -630,11 +635,13 @@ test("viewer high-water storage is bounded without reopening the prior winner", 
   );
   const firstViewer = "0".repeat(31) + "1";
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 3, scrollTop: 300 },
-      { viewerId: firstViewer, sequence: 1, observedAt: 2_000_500 },
-      firstState.trackingGeneration,
+      registeredObservation(
+        { viewerId: firstViewer, sequence: 1, observedAt: 2_000_500 },
+        firstState.trackingGeneration,
+      ),
     ),
     "updated",
   );
@@ -658,38 +665,44 @@ test("viewer high-water storage is bounded without reopening the prior winner", 
   });
 
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 9, scrollTop: 900 },
-      { viewerId: firstViewer, sequence: 2, observedAt: 2_000_700 },
-      firstState.trackingGeneration,
+      registeredObservation(
+        { viewerId: firstViewer, sequence: 2, observedAt: 2_000_700 },
+        firstState.trackingGeneration,
+      ),
     ),
     "stale",
   );
   assert.equal(
-    await books.updatePendingPositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 9, scrollTop: 900 },
-      { viewerId: firstViewer, sequence: 2, observedAt: 2_000_700 },
+      pendingObservation({ viewerId: firstViewer, sequence: 2, observedAt: 2_000_700 }),
     ),
     "stale",
   );
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 9, scrollTop: 900 },
-      { viewerId: freshViewer, sequence: 1, observedAt: 2_000_400 },
-      rotatedState.trackingGeneration,
+      registeredObservation(
+        { viewerId: freshViewer, sequence: 1, observedAt: 2_000_400 },
+        rotatedState.trackingGeneration,
+      ),
     ),
     "stale",
   );
   assert.equal(fake.snapshot().books[BOOK_A].currentPage, 3);
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 2, scrollTop: 200 },
-      { viewerId: freshViewer, sequence: 2, observedAt: 2_000_600 },
-      rotatedState.trackingGeneration,
+      registeredObservation(
+        { viewerId: freshViewer, sequence: 2, observedAt: 2_000_600 },
+        rotatedState.trackingGeneration,
+      ),
     ),
     "updated",
   );
@@ -718,19 +731,19 @@ test("malformed orphan order is isolated while malformed relevant order still re
   const beforeRelevantMutations = fake.snapshot();
   await assert.rejects(
     () =>
-      books.updatePositionObservation(
+      books.recordObservation(
         BOOK_A,
         { currentPage: 20, scrollTop: 2_000 },
-        observation,
+        registeredObservation(observation),
       ),
     BooksStorageDataError,
   );
   await assert.rejects(
     () =>
-      books.updatePendingPositionObservation(
+      books.recordObservation(
         BOOK_A,
         { currentPage: 20, scrollTop: 2_000 },
-        observation,
+        pendingObservation(observation),
       ),
     BooksStorageDataError,
   );
@@ -743,14 +756,14 @@ test("missing durable order migrates through lastReadAt before installing a wate
   const books = createTestBooksStorage(fake, 1_800_000_000);
 
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 2, scrollTop: 200 },
-      {
+      registeredObservation({
         viewerId: "d".repeat(32),
         sequence: 1,
         observedAt: 1_750_000_001_999,
-      },
+      }),
     ),
     "stale",
   );
@@ -762,16 +775,42 @@ test("missing durable order migrates through lastReadAt before installing a wate
     observedAt: 1_750_000_002_900,
   };
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 3, scrollTop: 300 },
-      migratedObservation,
+      registeredObservation(migratedObservation),
     ),
     "updated",
   );
   assert.deepEqual(fake.snapshot().positionOrder, {
     [BOOK_A]: expectedObservedOrder(migratedObservation),
   });
+});
+
+test("recordObservation rejects missing and unknown intents before storage access", async () => {
+  for (const intent of [undefined, "unknown"]) {
+    const fake = createChromeStorageFake({
+      books: { [BOOK_A]: canonicalRecord() },
+    });
+    const books = createTestBooksStorage(fake);
+    const observation = {
+      viewerId: "e".repeat(32),
+      sequence: 1,
+      observedAt: 1_750_000_000_000,
+      ...(intent === undefined ? {} : { intent }),
+    };
+
+    await assert.rejects(
+      () =>
+        books.recordObservation(
+          BOOK_A,
+          { currentPage: 2, scrollTop: 20 },
+          observation,
+        ),
+      /intent/i,
+    );
+    assert.deepEqual(fake.operations, []);
+  }
 });
 
 test("observed position mutations reject malformed input before storage access", async () => {
@@ -793,10 +832,10 @@ test("observed position mutations reject malformed input before storage access",
     const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
     const books = createTestBooksStorage(fake, 1_800_000_000);
     await assert.rejects(() =>
-      books.updatePositionObservation(
+      books.recordObservation(
         BOOK_A,
         { currentPage: 2, scrollTop: 20 },
-        observation,
+        registeredObservation(observation),
       ),
     );
     assert.deepEqual(fake.operations, []);
@@ -807,11 +846,10 @@ test("observed position mutations reject malformed input before storage access",
     const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
     const books = createTestBooksStorage(fake, 1_800_000_000);
     await assert.rejects(() =>
-      books.updatePositionObservation(
+      books.recordObservation(
         BOOK_A,
         { currentPage: 2, scrollTop: 20 },
-        validObservation,
-        generation,
+        registeredObservation(validObservation, generation),
       ),
     );
     assert.deepEqual(fake.operations, []);
@@ -824,14 +862,14 @@ test("a future unknown-viewer observation is invalid and installs no order", asy
   const books = createTestBooksStorage(fake, 1_800_000_000);
 
   assert.equal(
-    await books.updatePositionObservation(
+    await books.recordObservation(
       BOOK_A,
       { currentPage: 2, scrollTop: 20 },
-      {
+      registeredObservation({
         viewerId: "e".repeat(32),
         sequence: 1,
         observedAt: 1_800_000_001_000,
-      },
+      }),
     ),
     "invalid",
   );
@@ -854,14 +892,14 @@ test("malformed durable position order rejects without authorizing a write", asy
 
   await assert.rejects(
     () =>
-      books.updatePositionObservation(
+      books.recordObservation(
         BOOK_A,
         { currentPage: 20, scrollTop: 2_000 },
-        {
+        registeredObservation({
           viewerId: "f".repeat(32),
           sequence: 3,
           observedAt: 1_750_000_003_000,
-        },
+        }),
       ),
     BooksStorageDataError,
   );
@@ -950,14 +988,14 @@ test("v2 winner validation rejects every nonmaximum winner before mutation", asy
 
       await assert.rejects(
         () =>
-          books.updatePositionObservation(
+          books.recordObservation(
             BOOK_A,
             { currentPage: 20, scrollTop: 2_000 },
-            {
+            registeredObservation({
               viewerId: viewerC,
               sequence: 1,
               observedAt: 1_500,
-            },
+            }),
           ),
         BooksStorageDataError,
       );
@@ -1127,14 +1165,14 @@ test("position patches reject invalid shapes before storage access", async () =>
   for (const patch of invalidPatches) {
     const fake = createChromeStorageFake();
     await assert.rejects(() =>
-      createTestBooksStorage(fake).updatePositionObservation(
+      createTestBooksStorage(fake).recordObservation(
         BOOK_A,
         patch,
-        {
+        registeredObservation({
           viewerId: "9".repeat(32),
           sequence: 1,
           observedAt: 1_800_000_000_000,
-        },
+        }),
       ),
     );
     assert.deepEqual(fake.operations, []);
@@ -1245,14 +1283,14 @@ test("cross-context lock preserves simultaneous updates to distinct books", asyn
   const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldRead = fake.holdNext("get", { after: true });
 
-  const viewerWrite = viewerStore.updatePositionObservation(
+  const viewerWrite = viewerStore.recordObservation(
     BOOK_A,
     { currentPage: 20 },
-    {
+    registeredObservation({
       viewerId: "a".repeat(32),
       sequence: 1,
       observedAt: 1_800_000_001_000,
-    },
+    }),
   );
   await heldRead.started;
   const popupWrite = popupStore.upsertBook(BOOK_B, { title: "B" });
@@ -1277,14 +1315,14 @@ test("custom title updates preserve all latest fields under the cross-context lo
   const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldWrite = fake.holdNext("set");
 
-  const positionWrite = viewerStore.updatePositionObservation(
+  const positionWrite = viewerStore.recordObservation(
     BOOK_A,
     { currentPage: 20, scrollTop: 900 },
-    {
+    registeredObservation({
       viewerId: "b".repeat(32),
       sequence: 1,
       observedAt: 1_800_000_001_000,
-    },
+    }),
   );
   await heldWrite.started;
   const renameWrite = popupStore.updateCustomTitle(BOOK_A, "Renamed");
@@ -1351,14 +1389,14 @@ test("cross-context lock preserves simultaneous partial updates to the same book
   const popupStore = createTestBooksStorage(fake, 1_800_000_002);
   const heldWrite = fake.holdNext("set");
 
-  const viewerWrite = viewerStore.updatePositionObservation(
+  const viewerWrite = viewerStore.recordObservation(
     BOOK_A,
     { currentPage: 20 },
-    {
+    registeredObservation({
       viewerId: "c".repeat(32),
       sequence: 1,
       observedAt: 1_800_000_001_000,
-    },
+    }),
   );
   await heldWrite.started;
   const popupWrite = popupStore.upsertBook(BOOK_A, { customTitle: "Renamed" });
@@ -1376,14 +1414,14 @@ test("cross-context lock preserves simultaneous partial updates to the same book
 test("unavailable locks reject on the bounded deadline without touching storage", async () => {
   const fake = createChromeStorageFake({ books: { [BOOK_A]: canonicalRecord() } });
   const heldRead = fake.holdNext("get", { after: true });
-  const holderWrite = createTestBooksStorage(fake).updatePositionObservation(
+  const holderWrite = createTestBooksStorage(fake).recordObservation(
     BOOK_A,
     { currentPage: 20 },
-    {
+    registeredObservation({
       viewerId: "d".repeat(32),
       sequence: 1,
       observedAt: 1_800_000_000_000,
-    },
+    }),
   );
   await heldRead.started;
 
@@ -1439,15 +1477,17 @@ test("top-level API resolves Chrome dependencies lazily in extension contexts", 
     const viewerId = "e".repeat(32);
     const state = await getPositionTrackingState(BOOK_A, viewerId);
     assert.equal(
-      await updatePositionObservation(
+      await recordObservation(
         BOOK_A,
         { currentPage: 2, scrollTop: 10 },
-        {
-          viewerId,
-          sequence: 1,
-          observedAt: renamed.lastReadAt * 1_000,
-        },
-        state.trackingGeneration,
+        registeredObservation(
+          {
+            viewerId,
+            sequence: 1,
+            observedAt: renamed.lastReadAt * 1_000,
+          },
+          state.trackingGeneration,
+        ),
       ),
       "updated",
     );
