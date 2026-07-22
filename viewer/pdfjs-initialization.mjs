@@ -1,5 +1,23 @@
+// @ts-check
+
+/**
+ * @typedef {{
+ *   setTimeout: (callback: () => void, delay: number) => ReturnType<typeof globalThis.setTimeout>,
+ *   clearTimeout: (timer: ReturnType<typeof globalThis.setTimeout>) => void,
+ * }} TimerScheduler
+ */
+
 const PDF_JS_INITIALIZATION_TIMEOUT_MILLISECONDS = 10_000;
 
+/**
+ * @param {{
+ *   initializedPromise?: PromiseLike<unknown>,
+ *   scheduler?: TimerScheduler,
+ *   signal?: AbortSignal,
+ *   timeoutErrorMessage?: string,
+ * }} [options]
+ * @returns {Promise<boolean>}
+ */
 export function waitForPdfJsInitialization({
   initializedPromise,
   scheduler,
@@ -21,21 +39,33 @@ export function waitForPdfJsInitialization({
   ) {
     throw new TypeError("PDF.js initialization signal must be an AbortSignal");
   }
-  if (typeof timeoutErrorMessage !== "string" || timeoutErrorMessage.length === 0) {
-    throw new TypeError("PDF.js initialization timeout error message is required");
+  if (
+    typeof timeoutErrorMessage !== "string" ||
+    timeoutErrorMessage.length === 0
+  ) {
+    throw new TypeError(
+      "PDF.js initialization timeout error message is required",
+    );
   }
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {ReturnType<TimerScheduler["setTimeout"]> | undefined} */
     let timer;
 
+    /**
+     * @param {unknown} [error]
+     * @param {boolean} [initialized]
+     */
     function finish(error, initialized = true) {
       if (settled) {
         return;
       }
       settled = true;
-      scheduler.clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
+      /** @type {TimerScheduler} */ (scheduler).clearTimeout(
+        /** @type {ReturnType<TimerScheduler["setTimeout"]>} */ (timer),
+      );
+      /** @type {AbortSignal} */ (signal).removeEventListener("abort", onAbort);
       if (error) {
         reject(error);
       } else {

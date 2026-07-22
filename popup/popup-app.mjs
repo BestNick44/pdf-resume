@@ -1,11 +1,61 @@
+// @ts-check
+
 import { titleFromLocalPdfFilename } from "../shared/book-title.mjs";
 import { canonicalizeLocalPdfUrl } from "../shared/local-pdf-url.mjs";
 import { parseViewerFileQuery } from "../viewer/viewer-url.mjs";
+
+/** @typedef {import("../types/storage.d.ts").BookRecord} BookRecord */
+/** @typedef {ReturnType<typeof import("./popup-view.mjs").createPopupView>} PopupView */
+/** @typedef {{ fileUrl: string, filename: string, tabId: number, persisted?: boolean }} PopupCandidate */
+/** @typedef {{ tabId: number, url?: string, pendingUrl?: string }} CapturedTabNavigation */
+/** @typedef {NonNullable<NonNullable<Parameters<PopupView["showLibrary"]>[0]>["books"]>[number]} LibraryBookDetails */
+/** @typedef {{ busy?: boolean, customTitleDraft?: string, error?: string, fileAccessRequired?: boolean, status?: string }} TrackedStatus */
+/** @typedef {TrackedStatus & { title: string, customTitle: string | null, currentPage: number, totalPages: number, pagesRemaining: number | null, progressPercent: number | null }} TrackedBookDetails */
+/** @typedef {{ filename: string, actionLabel: string }} UntrackedDetails */
+/** @typedef {{ filename: string, message: string }} PendingDetails */
+/** @typedef {{ filename?: string, message: string, actionLabel?: string, persisted?: boolean }} ErrorDetails */
+/** @typedef {{ filename: string }} FileAccessDetails */
+/** @typedef {{ books: LibraryBookDetails[], busy?: boolean, error?: string, status?: string }} LibraryDetails */
+/** @typedef {{ title: string, message: string }} RemovedDetails */
+/** @typedef {{ filename: string, message: string }} SuccessDetails */
+/**
+ * @typedef {{
+ *   queryActiveTab: (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
+ *   getTab: (tabId: number) => Promise<chrome.tabs.Tab>,
+ *   updateTab: (tabId: number, updateProperties: chrome.tabs.UpdateProperties) => Promise<chrome.tabs.Tab | undefined>,
+ *   getRuntimeUrl: (path: string) => string,
+ *   isFileSchemeAccessAllowed: () => Promise<boolean>,
+ *   getBook: (fileUrl: string) => Promise<BookRecord | undefined>,
+ *   listBooks: () => Promise<Array<{ fileUrl: string, book: BookRecord }>>,
+ *   removeBook: (fileUrl: string) => Promise<boolean>,
+ *   trackBook: (fileUrl: string, patch: Pick<BookRecord, "title">) => Promise<BookRecord>,
+ *   updateCustomTitle: (fileUrl: string, customTitle: string | null) => Promise<BookRecord | undefined>,
+ *   view: PopupView,
+ * }} PopupDependencies
+ */
+/**
+ * @typedef {{
+ *   showError: ErrorDetails,
+ *   showFileAccessInstructions: FileAccessDetails,
+ *   showIneligible: undefined,
+ *   showLibrary: LibraryDetails,
+ *   showLoading: undefined,
+ *   showPending: PendingDetails,
+ *   showRemoved: RemovedDetails,
+ *   showSuccess: SuccessDetails,
+ *   showTracked: TrackedBookDetails,
+ *   showUntracked: UntrackedDetails,
+ * }} PopupRenderDetails
+ */
 
 const ACTIVE_TAB_QUERY = Object.freeze({ active: true, currentWindow: true });
 const TRACK_ACTION = "Track this book";
 const RETRY_OPEN_ACTION = "Retry opening viewer";
 
+/**
+ * @param {string} tabUrl
+ * @param {(path: string) => string} getRuntimeUrl
+ */
 function fileUrlFromViewer(tabUrl, getRuntimeUrl) {
   const activeUrl = new URL(tabUrl);
   const viewerUrl = new URL(getRuntimeUrl("viewer.html"));
@@ -20,12 +70,17 @@ function fileUrlFromViewer(tabUrl, getRuntimeUrl) {
   return parseViewerFileQuery(activeUrl.search).href;
 }
 
+/**
+ * @param {unknown} tabs
+ * @param {(path: string) => string} getRuntimeUrl
+ * @returns {PopupCandidate | undefined}
+ */
 function candidateFromTabs(tabs, getRuntimeUrl) {
   if (!Array.isArray(tabs) || tabs.length !== 1) {
     return undefined;
   }
 
-  const [tab] = tabs;
+  const [tab] = /** @type {Array<{ id?: unknown, url?: unknown }>} */ (tabs);
   if (!Number.isInteger(tab?.id) || typeof tab.url !== "string") {
     return undefined;
   }
@@ -44,18 +99,28 @@ function candidateFromTabs(tabs, getRuntimeUrl) {
   return {
     fileUrl,
     filename: titleFromLocalPdfFilename(fileUrl),
-    tabId: tab.id,
+    tabId: /** @type {number} */ (tab.id),
   };
 }
 
+/** @param {BookRecord} book */
 function displayTotalPages(book) {
   return book.totalPages >= book.currentPage ? book.totalPages : 0;
 }
 
+/**
+ * @param {number} currentPage
+ * @param {number} totalPages
+ */
 function progressPercent(currentPage, totalPages) {
   return totalPages > 0 ? Math.round((currentPage / totalPages) * 100) : null;
 }
 
+/**
+ * @param {BookRecord} book
+ * @param {TrackedStatus} [status]
+ * @returns {TrackedBookDetails}
+ */
 function trackedBookDetails(book, status = {}) {
   const totalPages = displayTotalPages(book);
   return {
@@ -69,6 +134,10 @@ function trackedBookDetails(book, status = {}) {
   };
 }
 
+/**
+ * @param {{ fileUrl: string, book: BookRecord }} entry
+ * @returns {LibraryBookDetails}
+ */
 function libraryBookDetails({ fileUrl, book }) {
   const totalPages = displayTotalPages(book);
   return {
@@ -80,6 +149,10 @@ function libraryBookDetails({ fileUrl, book }) {
   };
 }
 
+/**
+ * @param {chrome.tabs.Tab} tab
+ * @param {string} fileUrl
+ */
 function pendingUrlMatches(tab, fileUrl) {
   if (!tab.pendingUrl) {
     return true;
@@ -92,6 +165,11 @@ function pendingUrlMatches(tab, fileUrl) {
   }
 }
 
+/**
+ * @param {chrome.tabs.Tab} tab
+ * @param {PopupCandidate} candidate
+ * @param {(path: string) => string} getRuntimeUrl
+ */
 function tabMatchesCandidate(tab, candidate, getRuntimeUrl) {
   const currentCandidate = candidateFromTabs([tab], getRuntimeUrl);
   return (
@@ -99,6 +177,10 @@ function tabMatchesCandidate(tab, candidate, getRuntimeUrl) {
   );
 }
 
+/**
+ * @param {chrome.tabs.Tab & { id: number }} tab
+ * @returns {CapturedTabNavigation}
+ */
 function captureTabNavigation(tab) {
   return {
     tabId: tab.id,
@@ -107,12 +189,17 @@ function captureTabNavigation(tab) {
   };
 }
 
+/**
+ * @param {chrome.tabs.Tab} tab
+ * @param {CapturedTabNavigation} capturedTab
+ */
 function tabMatchesCapturedNavigation(tab, capturedTab) {
   return tab?.id === capturedTab.tabId &&
     tab.url === capturedTab.url &&
     tab.pendingUrl === capturedTab.pendingUrl;
 }
 
+/** @param {PopupDependencies} dependencies */
 export function createPopupApp({
   queryActiveTab,
   getTab,
@@ -125,7 +212,7 @@ export function createPopupApp({
   trackBook,
   updateCustomTitle,
   view,
-} = {}) {
+} = /** @type {PopupDependencies} */ ({})) {
   if (
     typeof queryActiveTab !== "function" ||
     typeof getTab !== "function" ||
@@ -142,24 +229,40 @@ export function createPopupApp({
     throw new TypeError("popup app requires tab, runtime, storage, and view dependencies");
   }
 
+  /** @type {PopupCandidate | undefined} */
   let candidate;
   let canActivate = false;
   let destroyed = false;
+  /** @type {LibraryBookDetails[] | undefined} */
   let libraryBooks;
+  /** @type {CapturedTabNavigation | undefined} */
   let libraryTab;
   let needsFileAccessInstructions = false;
+  /** @type {Promise<void> | undefined} */
   let pending;
   let started = false;
+  /** @type {BookRecord | undefined} */
   let trackedBook;
 
+  /**
+   * @template {keyof PopupRenderDetails} Method
+   * @param {Method} method
+   * @param {PopupRenderDetails[Method]} [details]
+   */
   function render(method, details) {
     if (!destroyed) {
-      view[method](details);
+      /** @type {(details?: PopupRenderDetails[Method]) => void} */ (
+        view[method]
+      )(details);
     }
   }
 
+  /**
+   * @param {TrackedStatus} [status]
+   * @returns {TrackedBookDetails}
+   */
   function currentTrackedBookDetails(status = {}) {
-    return trackedBookDetails(trackedBook, {
+    return trackedBookDetails(/** @type {BookRecord} */ (trackedBook), {
       ...status,
       ...(needsFileAccessInstructions ? { fileAccessRequired: true } : {}),
     });
@@ -168,7 +271,7 @@ export function createPopupApp({
   function showReadyCandidate() {
     canActivate = true;
     render("showUntracked", {
-      filename: candidate.filename,
+      filename: /** @type {PopupCandidate} */ (candidate).filename,
       actionLabel: TRACK_ACTION,
     });
   }
@@ -177,62 +280,103 @@ export function createPopupApp({
     canActivate = false;
     let stage = "permission";
     render("showPending", {
-      filename: candidate.filename,
-      message: candidate.persisted ? "Opening tracked book…" : "Tracking this book…",
+      filename: /** @type {PopupCandidate} */ (candidate).filename,
+      message: /** @type {PopupCandidate} */ (candidate).persisted
+        ? "Opening tracked book…"
+        : "Tracking this book…",
     });
 
     try {
       if (!(await isFileSchemeAccessAllowed())) {
-        render("showFileAccessInstructions", { filename: candidate.filename });
+        render("showFileAccessInstructions", {
+          filename: /** @type {PopupCandidate} */ (candidate).filename,
+        });
         return;
       }
 
       stage = "revalidate";
-      const currentTab = await getTab(candidate.tabId);
-      if (!tabMatchesCandidate(currentTab, candidate, getRuntimeUrl)) {
+      const currentTab = await getTab(
+        /** @type {PopupCandidate} */ (candidate).tabId,
+      );
+      if (
+        !tabMatchesCandidate(
+          currentTab,
+          /** @type {PopupCandidate} */ (candidate),
+          getRuntimeUrl,
+        )
+      ) {
         throw new Error("The original tab no longer shows this local PDF.");
       }
 
-      if (!candidate.persisted) {
+      if (!/** @type {PopupCandidate} */ (candidate).persisted) {
         stage = "permission";
         if (!(await isFileSchemeAccessAllowed())) {
-          render("showFileAccessInstructions", { filename: candidate.filename });
+          render("showFileAccessInstructions", {
+            filename: /** @type {PopupCandidate} */ (candidate).filename,
+          });
           return;
         }
 
         stage = "revalidate";
-        const persistenceCandidate = await getTab(candidate.tabId);
-        if (!tabMatchesCandidate(persistenceCandidate, candidate, getRuntimeUrl)) {
+        const persistenceCandidate = await getTab(
+          /** @type {PopupCandidate} */ (candidate).tabId,
+        );
+        if (
+          !tabMatchesCandidate(
+            persistenceCandidate,
+            /** @type {PopupCandidate} */ (candidate),
+            getRuntimeUrl,
+          )
+        ) {
           throw new Error("The original tab no longer shows this local PDF.");
         }
         stage = "storage";
-        await trackBook(candidate.fileUrl, { title: candidate.filename });
-        candidate.persisted = true;
+        await trackBook(/** @type {PopupCandidate} */ (candidate).fileUrl, {
+          title: /** @type {PopupCandidate} */ (candidate).filename,
+        });
+        /** @type {PopupCandidate} */ (candidate).persisted = true;
       }
 
       stage = "permission";
       if (!(await isFileSchemeAccessAllowed())) {
-        render("showFileAccessInstructions", { filename: candidate.filename });
+        render("showFileAccessInstructions", {
+          filename: /** @type {PopupCandidate} */ (candidate).filename,
+        });
         return;
       }
 
       stage = "redirect";
-      const viewerPath = `viewer.html?file=${encodeURIComponent(candidate.fileUrl)}`;
+      const viewerPath = `viewer.html?file=${encodeURIComponent(
+        /** @type {PopupCandidate} */ (candidate).fileUrl,
+      )}`;
       const viewerUrl = getRuntimeUrl(viewerPath);
-      const redirectCandidate = await getTab(candidate.tabId);
-      if (!tabMatchesCandidate(redirectCandidate, candidate, getRuntimeUrl)) {
+      const redirectCandidate = await getTab(
+        /** @type {PopupCandidate} */ (candidate).tabId,
+      );
+      if (
+        !tabMatchesCandidate(
+          redirectCandidate,
+          /** @type {PopupCandidate} */ (candidate),
+          getRuntimeUrl,
+        )
+      ) {
         throw new Error("The original tab no longer shows this local PDF.");
       }
-      const redirectedTab = await updateTab(candidate.tabId, { url: viewerUrl });
+      const redirectedTab = await updateTab(
+        /** @type {PopupCandidate} */ (candidate).tabId,
+        { url: viewerUrl },
+      );
       if (redirectedTab === undefined) {
         throw new Error("The original tab could not be opened in the viewer.");
       }
       render("showSuccess", {
-        filename: candidate.filename,
+        filename: /** @type {PopupCandidate} */ (candidate).filename,
         message: "Book tracked. Opening the viewer…",
       });
     } catch {
-      const persisted = Boolean(candidate.persisted);
+      const persisted = Boolean(
+        /** @type {PopupCandidate} */ (candidate).persisted,
+      );
       const message = persisted
         ? "This book is tracked, but the original PDF tab could not be opened in the viewer. Return that tab to the same PDF and retry."
         : stage === "revalidate"
@@ -240,7 +384,7 @@ export function createPopupApp({
           : "This book could not be tracked. No changes were made. Try again.";
       canActivate = true;
       render("showError", {
-        filename: candidate.filename,
+        filename: /** @type {PopupCandidate} */ (candidate).filename,
         actionLabel: persisted ? RETRY_OPEN_ACTION : TRACK_ACTION,
         message,
         persisted,
@@ -258,6 +402,10 @@ export function createPopupApp({
     return pending;
   }
 
+  /**
+   * @param {string | null} customTitle
+   * @param {string} customTitleDraft
+   */
   async function runRename(customTitle, customTitleDraft) {
     render(
       "showTracked",
@@ -268,11 +416,16 @@ export function createPopupApp({
       }),
     );
     try {
-      const updated = await updateCustomTitle(candidate.fileUrl, customTitle);
+      const updated = await updateCustomTitle(
+        /** @type {PopupCandidate} */ (candidate).fileUrl,
+        customTitle,
+      );
       if (!updated) {
-        const title = trackedBook.customTitle ?? trackedBook.title;
+        const title =
+          /** @type {BookRecord} */ (trackedBook).customTitle ??
+          /** @type {BookRecord} */ (trackedBook).title;
         trackedBook = undefined;
-        candidate.persisted = false;
+        /** @type {PopupCandidate} */ (candidate).persisted = false;
         render("showRemoved", { title, message: "This book is no longer tracked." });
         return;
       }
@@ -293,6 +446,7 @@ export function createPopupApp({
     }
   }
 
+  /** @param {unknown} customTitle */
   function rename(customTitle) {
     if (!candidate || !trackedBook || pending || destroyed || typeof customTitle !== "string") {
       return pending;
@@ -308,13 +462,15 @@ export function createPopupApp({
   }
 
   async function runUntrack() {
-    const title = trackedBook.customTitle ?? trackedBook.title;
+    const title =
+      /** @type {BookRecord} */ (trackedBook).customTitle ??
+      /** @type {BookRecord} */ (trackedBook).title;
     render(
       "showTracked",
       currentTrackedBookDetails({ busy: true, status: "Untracking…" }),
     );
     try {
-      await removeBook(candidate.fileUrl);
+      await removeBook(/** @type {PopupCandidate} */ (candidate).fileUrl);
       trackedBook = undefined;
       render("showRemoved", { title, message: "This book is no longer tracked." });
     } catch {
@@ -338,9 +494,10 @@ export function createPopupApp({
     return pending;
   }
 
+  /** @param {LibraryBookDetails} book */
   async function runOpenBook(book) {
     render("showLibrary", {
-      books: libraryBooks,
+      books: /** @type {LibraryBookDetails[]} */ (libraryBooks),
       busy: true,
       status: `Opening ${book.title}…`,
     });
@@ -350,8 +507,15 @@ export function createPopupApp({
         return;
       }
 
-      const currentTab = await getTab(libraryTab.tabId);
-      if (!tabMatchesCapturedNavigation(currentTab, libraryTab)) {
+      const currentTab = await getTab(
+        /** @type {CapturedTabNavigation} */ (libraryTab).tabId,
+      );
+      if (
+        !tabMatchesCapturedNavigation(
+          currentTab,
+          /** @type {CapturedTabNavigation} */ (libraryTab),
+        )
+      ) {
         throw new Error("the original tab has navigated elsewhere");
       }
       if (!(await isFileSchemeAccessAllowed())) {
@@ -360,27 +524,38 @@ export function createPopupApp({
       }
 
       const viewerPath = `viewer.html?file=${encodeURIComponent(book.fileUrl)}`;
-      const finalTab = await getTab(libraryTab.tabId);
-      if (!tabMatchesCapturedNavigation(finalTab, libraryTab)) {
+      const finalTab = await getTab(
+        /** @type {CapturedTabNavigation} */ (libraryTab).tabId,
+      );
+      if (
+        !tabMatchesCapturedNavigation(
+          finalTab,
+          /** @type {CapturedTabNavigation} */ (libraryTab),
+        )
+      ) {
         throw new Error("the original tab has navigated elsewhere");
       }
-      const openedTab = await updateTab(libraryTab.tabId, { url: getRuntimeUrl(viewerPath) });
+      const openedTab = await updateTab(
+        /** @type {CapturedTabNavigation} */ (libraryTab).tabId,
+        { url: getRuntimeUrl(viewerPath) },
+      );
       if (openedTab === undefined) {
         throw new Error("the tracked book could not be opened in the viewer");
       }
       render("showLibrary", {
-        books: libraryBooks,
+        books: /** @type {LibraryBookDetails[]} */ (libraryBooks),
         status: `Opening ${book.title} in the viewer…`,
       });
     } catch {
       render("showLibrary", {
-        books: libraryBooks,
+        books: /** @type {LibraryBookDetails[]} */ (libraryBooks),
         error: `${book.title} could not be opened. Try again.`,
         status: "Unable to open book",
       });
     }
   }
 
+  /** @param {string} fileUrl */
   function openBook(fileUrl) {
     const book = libraryBooks?.find((entry) => entry.fileUrl === fileUrl);
     if (!book || pending || destroyed) {
@@ -408,7 +583,9 @@ export function createPopupApp({
           render("showIneligible");
           return;
         }
-        libraryTab = captureTabNavigation(activeTab);
+        libraryTab = captureTabNavigation(
+          /** @type {chrome.tabs.Tab & { id: number }} */ (activeTab),
+        );
         libraryBooks = (await listBooks()).map(libraryBookDetails);
         render("showLibrary", { books: libraryBooks });
         return;

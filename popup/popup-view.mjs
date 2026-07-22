@@ -1,3 +1,22 @@
+// @ts-check
+
+/** @typedef {{ title?: string, filename?: string }} BookDisplayDetails */
+/** @typedef {{ fileUrl: string, title: string, currentPage: number, totalPages: number, progressPercent: number | null }} LibraryBookDetails */
+/** @typedef {{ books?: LibraryBookDetails[], busy?: boolean, error?: string, status?: string }} LibraryDetails */
+/** @typedef {{ actionLabel?: string, filename?: string, message?: string, persisted?: boolean }} ErrorDetails */
+/** @typedef {{ filename?: string, message?: string, title?: string }} MessageDetails */
+/** @typedef {{ actionLabel?: string, filename?: string }} UntrackedDetails */
+/** @typedef {{ busy?: boolean, customTitle?: string | null, customTitleDraft?: string, currentPage?: number, error?: string, fileAccessRequired?: boolean, pagesRemaining?: number | null, progressPercent?: number | null, status?: string, title?: string, totalPages?: number }} TrackedDetails */
+/** @typedef {() => void | Promise<void> | undefined} ActivationHandler */
+/** @typedef {(fileUrl: string) => void | Promise<void> | undefined} OpenBookHandler */
+/** @typedef {(customTitle: string) => void | Promise<void> | undefined} RenameHandler */
+/** @typedef {() => void | Promise<void> | undefined} UntrackHandler */
+
+/**
+ * @param {Document} hostDocument
+ * @param {string} selector
+ * @returns {Element}
+ */
 function requireElement(hostDocument, selector) {
   const element = hostDocument.querySelector(selector);
   if (!element) {
@@ -6,39 +25,84 @@ function requireElement(hostDocument, selector) {
   return element;
 }
 
+/** @param {number} pagesRemaining */
 function remainingLabel(pagesRemaining) {
   return `${pagesRemaining} ${pagesRemaining === 1 ? "page" : "pages"} remaining`;
 }
 
+/** @param {{ hostDocument?: Document }} [dependencies] */
 export function createPopupView({ hostDocument = globalThis.document } = {}) {
-  const main = requireElement(hostDocument, "#popupMain");
-  const status = requireElement(hostDocument, "#popupStatus");
-  const fileAccessInstructions = requireElement(hostDocument, "#fileAccessInstructions");
-  const book = requireElement(hostDocument, "#popupBook");
-  const filename = requireElement(hostDocument, "#bookFilename");
-  const message = requireElement(hostDocument, "#popupMessage");
-  const error = requireElement(hostDocument, "#popupError");
-  const action = requireElement(hostDocument, "#trackButton");
-  const dashboard = requireElement(hostDocument, "#trackedDashboard");
-  const pageSummary = requireElement(hostDocument, "#pageSummary");
-  const pagesRemaining = requireElement(hostDocument, "#pagesRemaining");
-  const progress = requireElement(hostDocument, "#progressBar");
-  const progressPercent = requireElement(hostDocument, "#progressPercent");
-  const renameForm = requireElement(hostDocument, "#renameForm");
-  const customTitle = requireElement(hostDocument, "#customTitle");
-  const renameButton = requireElement(hostDocument, "#renameButton");
-  const untrackButton = requireElement(hostDocument, "#untrackButton");
-  const library = requireElement(hostDocument, "#popupLibrary");
-  const libraryList = requireElement(hostDocument, "#libraryList");
+  const main = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#popupMain")
+  );
+  const status = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#popupStatus")
+  );
+  const fileAccessInstructions = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#fileAccessInstructions")
+  );
+  const book = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#popupBook")
+  );
+  const filename = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#bookFilename")
+  );
+  const message = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#popupMessage")
+  );
+  const error = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#popupError")
+  );
+  const action = /** @type {HTMLButtonElement} */ (
+    requireElement(hostDocument, "#trackButton")
+  );
+  const dashboard = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#trackedDashboard")
+  );
+  const pageSummary = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#pageSummary")
+  );
+  const pagesRemaining = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#pagesRemaining")
+  );
+  const progress = /** @type {HTMLProgressElement} */ (
+    requireElement(hostDocument, "#progressBar")
+  );
+  const progressPercent = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#progressPercent")
+  );
+  const renameForm = /** @type {HTMLFormElement} */ (
+    requireElement(hostDocument, "#renameForm")
+  );
+  const customTitle = /** @type {HTMLInputElement} */ (
+    requireElement(hostDocument, "#customTitle")
+  );
+  const renameButton = /** @type {HTMLButtonElement} */ (
+    requireElement(hostDocument, "#renameButton")
+  );
+  const untrackButton = /** @type {HTMLButtonElement} */ (
+    requireElement(hostDocument, "#untrackButton")
+  );
+  const library = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#popupLibrary")
+  );
+  const libraryList = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#libraryList")
+  );
+  /** @type {ActivationHandler | undefined} */
   let activationHandler;
+  /** @type {OpenBookHandler | undefined} */
   let openBookHandler;
+  /** @type {RenameHandler | undefined} */
   let renameHandler;
+  /** @type {UntrackHandler | undefined} */
   let untrackHandler;
 
   function onActivate() {
     activationHandler?.();
   }
 
+  /** @param {SubmitEvent} event */
   function onRename(event) {
     event.preventDefault();
     renameHandler?.(customTitle.value);
@@ -48,6 +112,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     untrackHandler?.();
   }
 
+  /** @param {{ busy?: boolean }} [state] */
   function reset({ busy = false } = {}) {
     main.setAttribute("aria-busy", String(busy));
     fileAccessInstructions.hidden = true;
@@ -75,11 +140,13 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     action.textContent = "";
   }
 
+  /** @param {BookDisplayDetails} [details] */
   function showBook(details = {}) {
     book.hidden = false;
     filename.textContent = details.title ?? details.filename ?? "";
   }
 
+  /** @param {string | undefined} label */
   function showAction(label) {
     if (!label) {
       return;
@@ -89,6 +156,11 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     action.hidden = false;
   }
 
+  /**
+   * @param {LibraryBookDetails} details
+   * @param {boolean | undefined} busy
+   * @param {number} index
+   */
   function createLibraryBook(details, busy, index) {
     const item = hostDocument.createElement("li");
     const button = hostDocument.createElement("button");
@@ -105,7 +177,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     item.className = "library-book";
     button.className = "library-book-button";
     button.type = "button";
-    button.disabled = busy;
+    button.disabled = /** @type {boolean} */ (busy);
     button.setAttribute("aria-label", `Open ${details.title}, ${summaryText}`);
     button.addEventListener("click", () => openBookHandler?.(details.fileUrl));
     title.className = "library-book-title";
@@ -151,22 +223,27 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       untrackButton.removeEventListener("click", onUntrack);
     },
 
+    /** @param {ActivationHandler} handler */
     setActivationHandler(handler) {
       activationHandler = handler;
     },
 
+    /** @param {OpenBookHandler} handler */
     setOpenBookHandler(handler) {
       openBookHandler = handler;
     },
 
+    /** @param {RenameHandler} handler */
     setRenameHandler(handler) {
       renameHandler = handler;
     },
 
+    /** @param {UntrackHandler} handler */
     setUntrackHandler(handler) {
       untrackHandler = handler;
     },
 
+    /** @param {ErrorDetails} [details] */
     showError(details = {}) {
       reset();
       status.textContent = details.persisted ? "Tracked book needs attention" : "Unable to track";
@@ -178,6 +255,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       showAction(details.actionLabel);
     },
 
+    /** @param {BookDisplayDetails} [details] */
     showFileAccessInstructions(details = {}) {
       reset();
       status.textContent = "File access required";
@@ -192,6 +270,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       message.hidden = false;
     },
 
+    /** @param {LibraryDetails} [details] */
     showLibrary(details = {}) {
       const books = details.books ?? [];
       reset({ busy: details.busy });
@@ -217,12 +296,14 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       status.textContent = "Checking the active tab…";
     },
 
+    /** @param {MessageDetails} [details] */
     showPending(details = {}) {
       reset({ busy: true });
       status.textContent = details.message ?? "Working…";
       showBook(details);
     },
 
+    /** @param {MessageDetails} [details] */
     showRemoved(details = {}) {
       reset();
       status.textContent = "Book untracked";
@@ -231,12 +312,14 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       message.hidden = false;
     },
 
+    /** @param {MessageDetails} [details] */
     showSuccess(details = {}) {
       reset();
       status.textContent = details.message ?? "Book tracked.";
       showBook(details);
     },
 
+    /** @param {TrackedDetails} [details] */
     showTracked(details = {}) {
       reset({ busy: details.busy });
       status.textContent =
@@ -245,11 +328,13 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       dashboard.hidden = false;
       fileAccessInstructions.hidden = !details.fileAccessRequired;
       pageSummary.textContent = `Page ${details.currentPage} of ${
-        details.totalPages > 0 ? details.totalPages : "—"
+        /** @type {number} */ (details.totalPages) > 0 ? details.totalPages : "—"
       }`;
-      if (details.totalPages > 0) {
-        pagesRemaining.textContent = remainingLabel(details.pagesRemaining);
-        progress.value = details.progressPercent;
+      if (/** @type {number} */ (details.totalPages) > 0) {
+        pagesRemaining.textContent = remainingLabel(
+          /** @type {number} */ (details.pagesRemaining),
+        );
+        progress.value = /** @type {number} */ (details.progressPercent);
         progressPercent.textContent = `${details.progressPercent}%`;
       } else {
         pagesRemaining.textContent = "Page count unavailable";
@@ -263,6 +348,7 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
       }
     },
 
+    /** @param {UntrackedDetails} [details] */
     showUntracked(details = {}) {
       reset();
       status.textContent = "Local PDF found";

@@ -1,5 +1,11 @@
+// @ts-check
+
 const LOCAL_PDF_URL_ERROR = "URL must be a valid local file:// PDF URL";
 
+/**
+ * @param {unknown} value
+ * @returns {URL}
+ */
 export function canonicalizeLocalPdfUrl(value) {
   if (typeof value !== "string") {
     throw new TypeError(LOCAL_PDF_URL_ERROR);

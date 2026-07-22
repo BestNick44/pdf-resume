@@ -1,4 +1,27 @@
+// @ts-check
+
 import { samePosition, validPosition } from "../shared/position.mjs";
+
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsApplication} PdfJsApplication */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsDocument} PdfJsDocument */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsEventBus} PdfJsEventBus */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsEventMap} PdfJsEventMap */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsPdfViewer} PdfJsPdfViewer */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsPageView} PdfJsPageView */
+/** @typedef {import("../types/storage.d.ts").Position} Position */
+/**
+ * @typedef {{
+ *   setTimeout: (callback: () => void, delay: number) => ReturnType<typeof globalThis.setTimeout>,
+ *   clearTimeout: (timer: ReturnType<typeof globalThis.setTimeout>) => void,
+ * }} TimerScheduler
+ */
+/** @typedef {TimerScheduler & Partial<Pick<typeof globalThis, "requestAnimationFrame" | "cancelAnimationFrame">>} FrameScheduler */
+/** @typedef {ReturnType<TimerScheduler["setTimeout"]> | number} FrameHandle */
+/** @typedef {PdfJsEventMap[keyof PdfJsEventMap]} PdfJsSourceEvent */
+/** @typedef {PdfJsEventMap["pagerendered"]} PdfJsPageRenderedEvent */
+/** @typedef {{ pageNumber?: number, error?: unknown }} PdfJsRenderOutcome */
+/** @typedef {{ outcomeFor: (pageView: PdfJsPageView) => PdfJsRenderOutcome | undefined }} PdfJsRenderOutcomes */
+/** @typedef {{ hasGenuineInteraction: () => boolean, runWithoutObserving?: (operation: () => void) => void }} PdfJsRestoreInteraction */
 
 const PDF_JS_RENDERING_FINISHED = 3;
 const PDF_JS_INITIAL_VIEW_TIMEOUT_MILLISECONDS = 10_000;
@@ -14,15 +37,37 @@ const GESTURE_INTERACTION_EVENTS = [
   "touchcancel",
 ];
 
+/**
+ * @param {PdfJsApplication} application
+ * @param {PdfJsDocument | null | undefined} documentIdentity
+ * @returns {number | undefined}
+ */
 function actualPageCount(application, documentIdentity) {
   const documentPages = documentIdentity?.numPages;
-  if (Number.isInteger(documentPages) && documentPages > 0) {
-    return documentPages;
+  if (
+    Number.isInteger(documentPages) &&
+    /** @type {number} */ (documentPages) > 0
+  ) {
+    return /** @type {number} */ (documentPages);
   }
   const viewerPages = application.pdfViewer.pagesCount;
-  return Number.isInteger(viewerPages) && viewerPages > 0 ? viewerPages : undefined;
+  return Number.isInteger(viewerPages) && viewerPages > 0
+    ? viewerPages
+    : undefined;
 }
 
+/**
+ * @param {{
+ *   eventBus: PdfJsEventBus,
+ *   pageNumber: number,
+ *   pdfViewer: PdfJsPdfViewer,
+ *   renderOutcomes: PdfJsRenderOutcomes,
+ *   scheduler: TimerScheduler,
+ *   signal: AbortSignal,
+ *   navigate: () => void,
+ * }} options
+ * @returns {Promise<boolean>}
+ */
 function waitForTargetPage({
   eventBus,
   pageNumber,
@@ -34,19 +79,25 @@ function waitForTargetPage({
 }) {
   const targetPage = pdfViewer.getPageView?.(pageNumber - 1);
   if (!targetPage) {
-    return Promise.reject(new Error(`PDF.js page ${pageNumber} is unavailable.`));
+    return Promise.reject(
+      new Error(`PDF.js page ${pageNumber} is unavailable.`),
+    );
   }
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {ReturnType<TimerScheduler["setTimeout"]> | undefined} */
     let timer;
 
+    /** @param {unknown} [error] */
     function finish(error) {
       if (settled) {
         return;
       }
       settled = true;
-      scheduler.clearTimeout(timer);
+      scheduler.clearTimeout(
+        /** @type {ReturnType<TimerScheduler["setTimeout"]>} */ (timer),
+      );
       eventBus.off("pagerendered", onPageRendered);
       signal.removeEventListener("abort", onAbort);
       if (error) {
@@ -60,6 +111,7 @@ function waitForTargetPage({
       finish();
     }
 
+    /** @param {PdfJsPageRenderedEvent} event */
     function onPageRendered(event) {
       if (event?.pageNumber !== pageNumber || event.source !== targetPage) {
         return;
@@ -93,19 +145,33 @@ function waitForTargetPage({
   });
 }
 
+/**
+ * @param {FrameScheduler} scheduler
+ * @param {AbortSignal} signal
+ * @returns {Promise<boolean>}
+ */
 function waitForLayout(scheduler, signal) {
   return new Promise((resolve) => {
+    /** @type {(callback: FrameRequestCallback) => FrameHandle} */
     const requestFrame =
       typeof scheduler.requestAnimationFrame === "function"
         ? scheduler.requestAnimationFrame.bind(scheduler)
-        : (callback) => scheduler.setTimeout(callback, 16);
+        : (callback) =>
+            scheduler.setTimeout(/** @type {() => void} */ (callback), 16);
+    /** @type {(handle: FrameHandle) => void} */
     const cancelFrame =
       typeof scheduler.cancelAnimationFrame === "function"
-        ? scheduler.cancelAnimationFrame.bind(scheduler)
-        : scheduler.clearTimeout.bind(scheduler);
+        ? /** @type {(handle: FrameHandle) => void} */ (
+            scheduler.cancelAnimationFrame.bind(scheduler)
+          )
+        : /** @type {(handle: FrameHandle) => void} */ (
+            scheduler.clearTimeout.bind(scheduler)
+          );
+    /** @type {FrameHandle | undefined} */
     let frame;
     let settled = false;
 
+    /** @param {boolean} ready */
     function finish(ready) {
       if (settled) {
         return;
@@ -116,7 +182,7 @@ function waitForLayout(scheduler, signal) {
     }
 
     function onAbort() {
-      cancelFrame(frame);
+      cancelFrame(/** @type {FrameHandle} */ (frame));
       finish(false);
     }
 
@@ -129,6 +195,15 @@ function waitForLayout(scheduler, signal) {
   });
 }
 
+/**
+ * @param {{
+ *   application: PdfJsApplication,
+ *   eventBus: PdfJsEventBus,
+ *   scheduler: TimerScheduler,
+ *   signal: AbortSignal,
+ * }} options
+ * @returns {Promise<boolean>}
+ */
 function waitForInitialView({ application, eventBus, scheduler, signal }) {
   if (application.isInitialViewSet) {
     return Promise.resolve(true);
@@ -136,14 +211,21 @@ function waitForInitialView({ application, eventBus, scheduler, signal }) {
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {ReturnType<TimerScheduler["setTimeout"]> | undefined} */
     let timer;
 
+    /**
+     * @param {unknown} [error]
+     * @param {boolean} [ready]
+     */
     function finish(error, ready = true) {
       if (settled) {
         return;
       }
       settled = true;
-      scheduler.clearTimeout(timer);
+      scheduler.clearTimeout(
+        /** @type {ReturnType<TimerScheduler["setTimeout"]>} */ (timer),
+      );
       eventBus.off("documentinit", onDocumentInit);
       eventBus.off("updateviewarea", onViewAreaUpdate);
       signal.removeEventListener("abort", onAbort);
@@ -158,12 +240,14 @@ function waitForInitialView({ application, eventBus, scheduler, signal }) {
       finish(undefined, false);
     }
 
+    /** @param {PdfJsSourceEvent} [event] */
     function onDocumentInit({ source } = {}) {
       if (source === application) {
         finish();
       }
     }
 
+    /** @param {PdfJsSourceEvent} [event] */
     function onViewAreaUpdate({ source } = {}) {
       if (source === application.pdfViewer && application.isInitialViewSet) {
         finish();
@@ -187,6 +271,12 @@ function waitForInitialView({ application, eventBus, scheduler, signal }) {
   });
 }
 
+/**
+ * @param {PdfJsPdfViewer} pdfViewer
+ * @param {TimerScheduler} scheduler
+ * @param {AbortSignal} signal
+ * @returns {Promise<boolean>}
+ */
 function waitForPages(pdfViewer, scheduler, signal) {
   const pagesPromise = pdfViewer.pagesPromise;
   if (!pagesPromise || typeof pagesPromise.then !== "function") {
@@ -195,14 +285,21 @@ function waitForPages(pdfViewer, scheduler, signal) {
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {ReturnType<TimerScheduler["setTimeout"]> | undefined} */
     let timer;
 
+    /**
+     * @param {unknown} [error]
+     * @param {boolean} [ready]
+     */
     function finish(error, ready = true) {
       if (settled) {
         return;
       }
       settled = true;
-      scheduler.clearTimeout(timer);
+      scheduler.clearTimeout(
+        /** @type {ReturnType<TimerScheduler["setTimeout"]>} */ (timer),
+      );
       signal.removeEventListener("abort", onAbort);
       if (error) {
         reject(error);
@@ -231,6 +328,10 @@ function waitForPages(pdfViewer, scheduler, signal) {
   });
 }
 
+/**
+ * @param {HTMLElement} container
+ * @returns {{ maximumScrollTop: number } | undefined}
+ */
 function layoutBounds(container) {
   const { clientHeight, scrollHeight } = container;
   if (
@@ -244,19 +345,36 @@ function layoutBounds(container) {
   return { maximumScrollTop: Math.max(0, scrollHeight - clientHeight) };
 }
 
+/**
+ * @param {PdfJsApplication} application
+ * @param {HTMLElement} container
+ * @param {number | undefined} pagesCount
+ * @returns {Position}
+ */
 function currentPosition(application, container, pagesCount) {
   const viewerPage = application.pdfViewer.currentPageNumber;
-  const currentPage = Number.isInteger(viewerPage) && viewerPage > 0 ? viewerPage : 1;
-  const boundedPage = pagesCount ? Math.min(currentPage, pagesCount) : currentPage;
+  const currentPage =
+    Number.isInteger(viewerPage) && viewerPage > 0 ? viewerPage : 1;
+  const boundedPage = pagesCount
+    ? Math.min(currentPage, pagesCount)
+    : currentPage;
   const viewerScrollTop = container.scrollTop;
-  const scrollTop = Number.isFinite(viewerScrollTop) && viewerScrollTop >= 0 ? viewerScrollTop : 0;
+  const scrollTop =
+    Number.isFinite(viewerScrollTop) && viewerScrollTop >= 0
+      ? viewerScrollTop
+      : 0;
   const bounds = layoutBounds(container);
   return {
     currentPage: boundedPage,
-    scrollTop: bounds ? Math.min(scrollTop, bounds.maximumScrollTop) : scrollTop,
+    scrollTop: bounds
+      ? Math.min(scrollTop, bounds.maximumScrollTop)
+      : scrollTop,
   };
 }
 
+/**
+ * @param {{ eventBus?: PdfJsEventBus }} [options]
+ */
 export function createPdfJsRenderOutcomeTracker({ eventBus } = {}) {
   if (
     !eventBus ||
@@ -266,9 +384,11 @@ export function createPdfJsRenderOutcomeTracker({ eventBus } = {}) {
     throw new TypeError("PDF.js render outcomes require an event bus");
   }
 
+  /** @type {WeakMap<object, PdfJsRenderOutcome>} */
   const outcomes = new WeakMap();
   let destroyed = false;
 
+  /** @param {PdfJsPageRenderedEvent} event */
   function onPageRendered(event) {
     if (!event?.source || typeof event.source !== "object") {
       return;
@@ -290,12 +410,24 @@ export function createPdfJsRenderOutcomeTracker({ eventBus } = {}) {
       eventBus.off("pagerendered", onPageRendered);
     },
 
+    /** @param {PdfJsPageView} pageView */
     outcomeFor(pageView) {
       return outcomes.get(pageView);
     },
   });
 }
 
+/**
+ * @param {{
+ *   container?: HTMLElement,
+ *   eventBus?: PdfJsEventBus,
+ *   interactionTarget?: EventTarget | null,
+ *   pdfViewer?: PdfJsPdfViewer,
+ *   readPosition?: () => Position,
+ *   onGenuinePositionChange?: (position: Position) => void,
+ *   scheduler?: TimerScheduler,
+ * }} [options]
+ */
 export function createPdfJsRestoreLifecycle({
   container,
   eventBus,
@@ -324,13 +456,17 @@ export function createPdfJsRestoreLifecycle({
     throw new TypeError("restore lifecycle requires PDF.js position events");
   }
   if (typeof readPosition !== "function") {
-    throw new TypeError("restore lifecycle must be able to read the live position");
+    throw new TypeError(
+      "restore lifecycle must be able to read the live position",
+    );
   }
   if (
     onGenuinePositionChange !== undefined &&
     typeof onGenuinePositionChange !== "function"
   ) {
-    throw new TypeError("restore lifecycle position observer must be a function");
+    throw new TypeError(
+      "restore lifecycle position observer must be a function",
+    );
   }
   if (
     !scheduler ||
@@ -342,9 +478,11 @@ export function createPdfJsRestoreLifecycle({
 
   let destroyed = false;
   let genuinePositionChange = false;
+  /** @type {ReturnType<TimerScheduler["setTimeout"]> | undefined} */
   let idleTimer;
   let ignoredPositionChanges = 0;
   let pointerActive = false;
+  /** @type {Position | undefined} */
   let positionBeforeInteraction;
   let touchActive = false;
 
@@ -374,8 +512,11 @@ export function createPdfJsRestoreLifecycle({
     );
   }
 
+  /** @param {{ bounded?: boolean }} [options] */
   function beginIntent({ bounded = false } = {}) {
-    positionBeforeInteraction ??= validPosition(readPosition());
+    positionBeforeInteraction ??= validPosition(
+      /** @type {() => Position} */ (readPosition)(),
+    );
     if (bounded) {
       scheduleIdle();
     } else {
@@ -391,7 +532,9 @@ export function createPdfJsRestoreLifecycle({
     ) {
       return;
     }
-    const position = validPosition(readPosition());
+    const position = validPosition(
+      /** @type {() => Position} */ (readPosition)(),
+    );
     if (samePosition(positionBeforeInteraction, position)) {
       return;
     }
@@ -399,12 +542,14 @@ export function createPdfJsRestoreLifecycle({
     onGenuinePositionChange?.(position);
   }
 
+  /** @param {Event} event */
   function onTransientInteraction(event) {
     if (event?.isTrusted === true) {
       beginIntent({ bounded: true });
     }
   }
 
+  /** @param {Event} event */
   function onGestureInteraction(event) {
     if (event?.isTrusted !== true) {
       return;
@@ -431,6 +576,7 @@ export function createPdfJsRestoreLifecycle({
     }
   }
 
+  /** @param {PdfJsSourceEvent} [event] */
   function onViewAreaUpdate({ source } = {}) {
     if (source === pdfViewer) {
       observePositionActivity();
@@ -445,7 +591,9 @@ export function createPdfJsRestoreLifecycle({
   }
   eventBus.on("pagechanging", onViewAreaUpdate);
   eventBus.on("updateviewarea", onViewAreaUpdate);
-  container.addEventListener("scroll", observePositionActivity, { passive: true });
+  container.addEventListener("scroll", observePositionActivity, {
+    passive: true,
+  });
 
   return Object.freeze({
     destroy() {
@@ -456,7 +604,11 @@ export function createPdfJsRestoreLifecycle({
       cancelIdleTimer();
       positionBeforeInteraction = undefined;
       for (const type of TRANSIENT_INTERACTION_EVENTS) {
-        interactionTarget.removeEventListener(type, onTransientInteraction, true);
+        interactionTarget.removeEventListener(
+          type,
+          onTransientInteraction,
+          true,
+        );
       }
       for (const type of GESTURE_INTERACTION_EVENTS) {
         interactionTarget.removeEventListener(type, onGestureInteraction, true);
@@ -470,6 +622,11 @@ export function createPdfJsRestoreLifecycle({
       return genuinePositionChange;
     },
 
+    /**
+     * @template T
+     * @param {() => T} operation
+     * @returns {T}
+     */
     runWithoutObserving(operation) {
       ignoredPositionChanges += 1;
       try {
@@ -484,6 +641,22 @@ export function createPdfJsRestoreLifecycle({
   });
 }
 
+/**
+ * @param {{
+ *   application: PdfJsApplication,
+ *   container: HTMLElement,
+ *   documentIdentity: PdfJsDocument,
+ *   eventBus: PdfJsEventBus,
+ *   interaction: PdfJsRestoreInteraction,
+ *   isCurrent: () => boolean,
+ *   renderOutcomes: PdfJsRenderOutcomes,
+ *   savedPosition: Position,
+ *   scheduler?: FrameScheduler,
+ *   signal?: AbortSignal,
+ *   startTracking: (initialPosition: Position, currentPosition: Position) => void,
+ * }} options
+ * @returns {Promise<Position | undefined>}
+ */
 export async function restorePdfJsPosition({
   application,
   container,
@@ -504,7 +677,9 @@ export async function restorePdfJsPosition({
     typeof eventBus.on !== "function" ||
     typeof eventBus.off !== "function"
   ) {
-    throw new TypeError("PDF.js application, container, and event bus are required");
+    throw new TypeError(
+      "PDF.js application, container, and event bus are required",
+    );
   }
   if (
     !interaction ||
@@ -529,6 +704,7 @@ export async function restorePdfJsPosition({
   const position = validPosition(savedPosition, "saved position");
   const active = new AbortController();
   const abort = () => active.abort();
+  /** @param {PdfJsSourceEvent} [event] */
   const onPagesDestroy = ({ source } = {}) => {
     if (source === application.pdfViewer) {
       active.abort();
@@ -576,7 +752,11 @@ export async function restorePdfJsPosition({
 
     if (interaction.hasGenuineInteraction()) {
       clampRestoredPosition();
-      const handoffPosition = currentPosition(application, container, pagesCount);
+      const handoffPosition = currentPosition(
+        application,
+        container,
+        pagesCount,
+      );
       startTracking(restoredPosition, handoffPosition);
       return handoffPosition;
     }
@@ -607,7 +787,11 @@ export async function restorePdfJsPosition({
       if (!(await waitForLayout(scheduler, active.signal)) || !isCurrent()) {
         return undefined;
       }
-      const handoffPosition = currentPosition(application, container, pagesCount);
+      const handoffPosition = currentPosition(
+        application,
+        container,
+        pagesCount,
+      );
       clampRestoredPosition();
       startTracking(restoredPosition, handoffPosition);
       return handoffPosition;
@@ -617,7 +801,11 @@ export async function restorePdfJsPosition({
       return undefined;
     }
     if (interaction.hasGenuineInteraction()) {
-      const handoffPosition = currentPosition(application, container, pagesCount);
+      const handoffPosition = currentPosition(
+        application,
+        container,
+        pagesCount,
+      );
       clampRestoredPosition();
       startTracking(restoredPosition, handoffPosition);
       return handoffPosition;

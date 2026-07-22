@@ -1,12 +1,28 @@
+// @ts-check
+
 import {
   buildPdfJsViewerUrl,
   parseViewerFileQuery,
   ViewerInputError,
 } from "./viewer-url.mjs";
 
+/** @typedef {ReturnType<typeof import("./viewer-view.mjs").createViewerView>} ViewerView */
+/** @typedef {{ fileUrl: string, objectUrl: string }} BootedViewer */
+
 const READ_ERROR =
   "The local PDF could not be read. Verify that the file still exists and can be opened.";
 
+/**
+ * @param {{
+ *   search: unknown,
+ *   fetchPdf: typeof globalThis.fetch,
+ *   createObjectUrl: (blob: Blob) => string,
+ *   isFileSchemeAccessAllowed: () => boolean | PromiseLike<boolean>,
+ *   pdfJsViewerUrl: URL,
+ *   view: ViewerView,
+ * }} options
+ * @returns {Promise<BootedViewer | undefined>}
+ */
 export async function bootViewer({
   search,
   fetchPdf,
@@ -42,6 +58,8 @@ export async function bootViewer({
     view.showViewer(buildPdfJsViewerUrl(objectUrl, fileUrl, pdfJsViewerUrl));
     return { fileUrl: fileUrl.href, objectUrl };
   } catch (error) {
-    view.showError(error instanceof ViewerInputError ? error.message : READ_ERROR);
+    view.showError(
+      error instanceof ViewerInputError ? error.message : READ_ERROR,
+    );
   }
 }

@@ -1,6 +1,38 @@
+// @ts-check
+
 import { resolveAutomaticBookTitle } from "../shared/book-title.mjs";
 import { waitForPdfJsInitialization } from "./pdfjs-initialization.mjs";
 
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsApplication} PdfJsApplication */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsDocument} PdfJsDocument */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsEventBus} PdfJsEventBus */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsEventMap} PdfJsEventMap */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsFrame} PdfJsFrame */
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsWindow} PdfJsWindow */
+/** @typedef {import("../types/storage.d.ts").BookRecord} BookRecord */
+
+/**
+ * @typedef {{
+ *   setTimeout: (callback: () => void, delay: number) => ReturnType<typeof globalThis.setTimeout>,
+ *   clearTimeout: (timer: ReturnType<typeof globalThis.setTimeout>) => void,
+ * }} TimeoutScheduler
+ */
+
+/**
+ * @param {{
+ *   fileUrl: string,
+ *   frame: PdfJsFrame,
+ *   getBook: (fileUrl: string) => Promise<BookRecord | undefined>,
+ *   hydrateMetadata: (
+ *     fileUrl: string,
+ *     patch: { title: string, totalPages: number },
+ *     options?: { signal?: AbortSignal },
+ *   ) => Promise<BookRecord | undefined>,
+ *   scheduler?: TimeoutScheduler,
+ *   resolveTitle?: (metadata: unknown, fileUrl: string) => string,
+ *   reportError?: (error: unknown) => void,
+ * }} [dependencies]
+ */
 export function createPdfJsMetadataHydration({
   fileUrl,
   frame,
@@ -9,7 +41,7 @@ export function createPdfJsMetadataHydration({
   scheduler = globalThis,
   resolveTitle = resolveAutomaticBookTitle,
   reportError = (error) => console.error("Unable to read PDF metadata.", error),
-} = {}) {
+} = /** @type {never} */ ({})) {
   if (!frame || typeof frame.addEventListener !== "function") {
     throw new TypeError("frame must be an event target");
   }
@@ -30,15 +62,27 @@ export function createPdfJsMetadataHydration({
   }
 
   let generation = 0;
+  /** @type {PdfJsApplication | undefined} */
   let application;
+  /** @type {PdfJsEventBus | undefined} */
   let eventBus;
+  /** @type {AbortController | undefined} */
   let initializationAbort;
+  /** @type {AbortController | undefined} */
   let hydrationAbort;
+  /** @type {((event: PdfJsEventMap["pagesdestroy"]) => void) | undefined} */
   let pagesDestroyListener;
+  /** @type {((event: PdfJsEventMap["pagesinit"]) => void) | undefined} */
   let pagesInitListener;
+  /** @type {PdfJsDocument | undefined} */
   let originalDocument;
+  /** @type {Promise<void>} */
   let setupPromise = Promise.resolve();
 
+  /**
+   * @param {PdfJsDocument} documentIdentity
+   * @param {number} expectedGeneration
+   */
   function isCurrent(documentIdentity, expectedGeneration) {
     return (
       generation === expectedGeneration &&
@@ -65,6 +109,11 @@ export function createPdfJsMetadataHydration({
     originalDocument = undefined;
   }
 
+  /**
+   * @param {PdfJsDocument} documentIdentity
+   * @param {number} expectedGeneration
+   * @param {AbortSignal} signal
+   */
   async function hydrateDocument(documentIdentity, expectedGeneration, signal) {
     try {
       const book = await getBook(fileUrl);
@@ -96,6 +145,10 @@ export function createPdfJsMetadataHydration({
     }
   }
 
+  /**
+   * @param {number} expectedGeneration
+   * @param {PdfJsEventMap["pagesinit"]} [event]
+   */
   function handlePagesInit(expectedGeneration, { source } = {}) {
     if (
       generation !== expectedGeneration ||
@@ -123,12 +176,21 @@ export function createPdfJsMetadataHydration({
     }
   }
 
+  /**
+   * @param {number} expectedGeneration
+   * @param {PdfJsEventMap["pagesdestroy"]} [event]
+   */
   function handlePagesDestroy(expectedGeneration, { source } = {}) {
     if (generation === expectedGeneration && source === application?.pdfViewer) {
       removeViewerListeners();
     }
   }
 
+  /**
+   * @param {number} expectedGeneration
+   * @param {PdfJsWindow | null} frameWindow
+   * @param {AbortSignal} signal
+   */
   async function initializeFrame(expectedGeneration, frameWindow, signal) {
     const nextApplication = frameWindow?.PDFViewerApplication;
     if (!nextApplication?.initializedPromise) {
@@ -149,8 +211,8 @@ export function createPdfJsMetadataHydration({
       return;
     }
 
-    application = nextApplication;
-    eventBus = nextApplication.eventBus;
+    application = /** @type {PdfJsApplication} */ (nextApplication);
+    eventBus = application.eventBus;
     pagesInitListener = (event) => handlePagesInit(expectedGeneration, event);
     pagesDestroyListener = (event) => handlePagesDestroy(expectedGeneration, event);
     eventBus.on("pagesinit", pagesInitListener);

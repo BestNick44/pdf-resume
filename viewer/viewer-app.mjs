@@ -1,3 +1,5 @@
+// @ts-check
+
 import {
   getBook,
   getPositionTrackingState,
@@ -9,6 +11,40 @@ import { createPdfJsPositionTracking } from "./pdfjs-position-tracking.mjs";
 import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
 
+/** @typedef {import("../types/pdfjs.d.ts").PdfJsFrame} PdfJsFrame */
+/** @typedef {import("../types/storage.d.ts").PendingPositionHandoffMessage | import("../types/storage.d.ts").UpdatePositionMessage} PositionMutationMessage */
+
+/**
+ * @typedef {{
+ *   destroy: () => void,
+ *   settled: () => Promise<void>,
+ * }} MetadataHydration
+ */
+
+/**
+ * @typedef {{
+ *   destroy: () => void,
+ *   handoff: () => void,
+ *   settled: () => Promise<unknown>,
+ * }} PositionTracking
+ */
+
+/**
+ * @typedef {{
+ *   showError: (message: string) => void,
+ *   showFileAccessInstructions: () => void,
+ *   showViewer: (viewerUrl: URL) => void,
+ *   showWarning: (message: string, error?: unknown) => void,
+ * }} ViewerView
+ */
+
+/**
+ * @typedef {{
+ *   setTimeout: (callback: () => void, delay: number) => ReturnType<typeof globalThis.setTimeout>,
+ *   clearTimeout: (timer: ReturnType<typeof globalThis.setTimeout>) => void,
+ * }} ViewerTimerScheduler
+ */
+
 const RESTORE_WARNING =
   "The saved reading position could not be restored. You can keep reading this PDF.";
 const METADATA_WARNING =
@@ -16,6 +52,38 @@ const METADATA_WARNING =
 const STARTUP_ERROR =
   "The PDF viewer could not be initialized. Reload this page to try again.";
 
+/**
+ * @param {{
+ *   hostDocument?: Document,
+ *   hostWindow?: Window,
+ *   fetchPdf?: typeof globalThis.fetch,
+ *   createObjectUrl?: (blob: Blob) => string,
+ *   revokeObjectUrl?: (url: string) => void,
+ *   isFileSchemeAccessAllowed?: () => boolean | Promise<boolean>,
+ *   sendMessage?: (message: PositionMutationMessage) => unknown,
+ *   getBookOperation?: typeof getBook,
+ *   getPositionTrackingStateOperation?: typeof getPositionTrackingState,
+ *   hydrateMetadataOperation?: typeof hydrateMetadata,
+ *   bootViewerOperation?: typeof bootViewer,
+ *   createMetadataHydration?: typeof createPdfJsMetadataHydration,
+ *   createPositionTracking?: typeof createPdfJsPositionTracking,
+ *   createView?: (elements: {
+ *     errorPanel: HTMLElement,
+ *     errorMessage: HTMLElement,
+ *     fileAccessInstructions: HTMLElement,
+ *     frame: HTMLIFrameElement,
+ *     warningPanel: HTMLElement,
+ *     warningMessage: HTMLElement,
+ *   }) => ViewerView,
+ *   metadataHydrationScheduler?: ViewerTimerScheduler,
+ *   positionTrackingScheduler?: ViewerTimerScheduler & {
+ *     requestAnimationFrame?: (callback: FrameRequestCallback) => number,
+ *     cancelAnimationFrame?: (handle: number) => void,
+ *   },
+ *   positionTrackingClock?: { now: () => number },
+ *   pdfJsViewerUrl?: URL,
+ * }} [dependencies]
+ */
 export async function startViewerApp({
   hostDocument = globalThis.document,
   hostWindow = globalThis.window,
@@ -37,14 +105,27 @@ export async function startViewerApp({
   positionTrackingClock = { now: () => Date.now() },
   pdfJsViewerUrl = new URL("./pdfjs/web/viewer.html", import.meta.url),
 } = {}) {
-  const frame = hostDocument.querySelector("#pdfViewer");
+  // PDF.js owns this iframe global; this is its single cast into app-owned code.
+  const frame = /** @type {PdfJsFrame} */ (
+    hostDocument.querySelector("#pdfViewer")
+  );
   const view = createView({
-    errorPanel: hostDocument.querySelector("#viewerError"),
-    errorMessage: hostDocument.querySelector("#viewerErrorMessage"),
-    fileAccessInstructions: hostDocument.querySelector("#viewerFileAccessInstructions"),
+    errorPanel: /** @type {HTMLElement} */ (
+      hostDocument.querySelector("#viewerError")
+    ),
+    errorMessage: /** @type {HTMLElement} */ (
+      hostDocument.querySelector("#viewerErrorMessage")
+    ),
+    fileAccessInstructions: /** @type {HTMLElement} */ (
+      hostDocument.querySelector("#viewerFileAccessInstructions")
+    ),
     frame,
-    warningPanel: hostDocument.querySelector("#viewerWarning"),
-    warningMessage: hostDocument.querySelector("#viewerWarningMessage"),
+    warningPanel: /** @type {HTMLElement} */ (
+      hostDocument.querySelector("#viewerWarning")
+    ),
+    warningMessage: /** @type {HTMLElement} */ (
+      hostDocument.querySelector("#viewerWarningMessage")
+    ),
   });
   const viewer = await bootViewerOperation({
     search: hostWindow.location.search,
@@ -58,8 +139,11 @@ export async function startViewerApp({
   if (!viewer) {
     return undefined;
   }
+  const activeViewer = viewer;
 
+  /** @type {MetadataHydration | undefined} */
   let metadataHydration;
+  /** @type {PositionTracking | undefined} */
   let positionTracking;
   let pageHideRegistrationAttempted = false;
   let destroyed = false;
@@ -80,21 +164,21 @@ export async function startViewerApp({
         try {
           positionTracking?.destroy();
         } finally {
-          revokeObjectUrl(viewer.objectUrl);
+          revokeObjectUrl(activeViewer.objectUrl);
         }
       }
     }
   }
 
   function onPageHide() {
-    positionTracking.handoff();
+    /** @type {PositionTracking} */ (positionTracking).handoff();
     destroy();
   }
 
   try {
     const positionUpdates = createPositionUpdateClient({ sendMessage });
     metadataHydration = createMetadataHydration({
-      fileUrl: viewer.fileUrl,
+      fileUrl: activeViewer.fileUrl,
       frame,
       getBook: getBookOperation,
       hydrateMetadata: hydrateMetadataOperation,
@@ -104,7 +188,7 @@ export async function startViewerApp({
       scheduler: metadataHydrationScheduler,
     });
     positionTracking = createPositionTracking({
-      fileUrl: viewer.fileUrl,
+      fileUrl: activeViewer.fileUrl,
       frame,
       hostDocument,
       clock: positionTrackingClock,
@@ -128,5 +212,10 @@ export async function startViewerApp({
     throw error;
   }
 
-  return Object.freeze({ destroy, metadataHydration, positionTracking, viewer });
+  return Object.freeze({
+    destroy,
+    metadataHydration,
+    positionTracking,
+    viewer: activeViewer,
+  });
 }

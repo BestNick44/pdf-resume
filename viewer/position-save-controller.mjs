@@ -1,22 +1,60 @@
+// @ts-check
+
 import {
   createPositionObservationSource,
   validPositionObservation,
 } from "../shared/position-update-messaging.mjs";
 import { samePosition, validPosition } from "../shared/position.mjs";
 
+/** @typedef {import("../types/storage.d.ts").Position} Position */
+/** @typedef {import("../types/storage.d.ts").PositionObservation} PositionObservation */
+/**
+ * @typedef {{
+ *   setTimeout: (callback: () => void, delay: number) => ReturnType<typeof globalThis.setTimeout>,
+ *   clearTimeout: (timer: ReturnType<typeof globalThis.setTimeout>) => void,
+ * }} TimerScheduler
+ */
+/** @typedef {{ now: () => number }} Clock */
+/** @typedef {{ next: () => PositionObservation }} PositionObservationSource */
+/** @typedef {{ position: Position, observation: PositionObservation }} PositionUpdate */
+/** @typedef {"debounce" | "retry"} TimerKind */
+/** @typedef {{ disabled: boolean, durable: boolean, pending: boolean, retryPending: boolean }} SaveStatus */
+
 const DEFAULT_DEBOUNCE_MILLISECONDS = 1_000;
 const DEFAULT_RETRY_DELAYS_MILLISECONDS = Object.freeze([250, 1_000, 4_000]);
 
+/**
+ * @param {readonly number[]} delays
+ * @returns {number[]}
+ */
 function validateDelays(delays) {
   if (
     !Array.isArray(delays) ||
     delays.some((delay) => !Number.isFinite(delay) || delay < 0)
   ) {
-    throw new TypeError("retry delays must be an array of non-negative numbers");
+    throw new TypeError(
+      "retry delays must be an array of non-negative numbers",
+    );
   }
   return [...delays];
 }
 
+/**
+ * @param {{
+ *   fileUrl: string,
+ *   initialPosition: Position,
+ *   updatePosition: (
+ *     fileUrl: string,
+ *     position: Position,
+ *     observation: PositionObservation,
+ *   ) => Promise<unknown>,
+ *   scheduler?: TimerScheduler,
+ *   clock?: Clock,
+ *   observationSource?: PositionObservationSource,
+ *   debounceMilliseconds?: number,
+ *   retryDelaysMilliseconds?: readonly number[],
+ * }} options
+ */
 export function createPositionSaveController({
   fileUrl,
   initialPosition,
@@ -53,17 +91,27 @@ export function createPositionSaveController({
     throw new TypeError("observationSource must provide next");
   }
 
+  /** @type {Position} */
   let latestPosition = validPosition(initialPosition);
+  /** @type {PositionObservation | undefined} */
   let latestObservation;
+  /** @type {Position} */
   let savedPosition = latestPosition;
+  /** @type {PositionUpdate | undefined} */
   let readyUpdate;
+  /** @type {ReturnType<TimerScheduler["setTimeout"]> | undefined} */
   let timer;
+  /** @type {TimerKind | undefined} */
   let timerKind;
+  /** @type {Promise<void> | undefined} */
   let running;
+  /** @type {PositionUpdate | undefined} */
   let activeUpdate;
   let failedAttempts = 0;
   let retriesExhausted = false;
+  /** @type {Promise<void> | undefined} */
   let retirementPromise;
+  /** @type {(() => void) | undefined} */
   let resolveRetirement;
   let retired = false;
   let destroyed = false;
@@ -77,18 +125,31 @@ export function createPositionSaveController({
     timerKind = undefined;
   }
 
+  /**
+   * @param {TimerKind} kind
+   * @param {number} delay
+   */
   function scheduleTimer(kind, delay) {
     cancelTimer();
     timerKind = kind;
     timer = scheduler.setTimeout(onDeadline, delay);
   }
 
+  /**
+   * @param {PositionObservation} [observation]
+   * @returns {Readonly<PositionObservation>}
+   */
   function observationValue(observation) {
     return Object.freeze(
       validPositionObservation(observation ?? observations.next()),
     );
   }
 
+  /**
+   * @param {Position} position
+   * @param {PositionObservation} [observation]
+   * @returns {boolean}
+   */
   function captureLatest(position, observation) {
     const positionValue = validPosition(position);
     if (samePosition(positionValue, latestPosition)) {
@@ -99,6 +160,7 @@ export function createPositionSaveController({
     return true;
   }
 
+  /** @returns {PositionUpdate} */
   function latestUpdate() {
     latestObservation ??= observationValue();
     return {
@@ -107,6 +169,7 @@ export function createPositionSaveController({
     };
   }
 
+  /** @param {PositionUpdate} update */
   function scheduleRetry(update) {
     readyUpdate = update;
     if (failedAttempts >= retryDelays.length) {
@@ -137,6 +200,7 @@ export function createPositionSaveController({
     resolve();
   }
 
+  /** @returns {Promise<void>} */
   function startPump() {
     if (running || destroyed || disabled) {
       return running ?? Promise.resolve();
@@ -193,6 +257,10 @@ export function createPositionSaveController({
     return running;
   }
 
+  /**
+   * @param {{ resetFailures?: boolean }} [options]
+   * @returns {Promise<void>}
+   */
   function makeReady({ resetFailures = false } = {}) {
     if (destroyed || disabled) {
       finishRetirement();
@@ -213,6 +281,7 @@ export function createPositionSaveController({
     return makeReady({ resetFailures: expiredKind === "debounce" });
   }
 
+  /** @returns {Readonly<SaveStatus>} */
   function status() {
     const durable =
       !disabled &&
@@ -229,6 +298,10 @@ export function createPositionSaveController({
   }
 
   return Object.freeze({
+    /**
+     * @param {Position} position
+     * @param {PositionObservation} [observation]
+     */
     observe(position, observation) {
       if (destroyed || disabled || retired) {
         return;
@@ -243,6 +316,7 @@ export function createPositionSaveController({
       scheduleTimer("debounce", debounceMilliseconds);
     },
 
+    /** @param {Position} [position] */
     flush(position) {
       if (destroyed || disabled || retired) {
         return Promise.resolve();
@@ -268,6 +342,7 @@ export function createPositionSaveController({
       return retirementPromise;
     },
 
+    /** @param {Position} position */
     prepareHandoff(position) {
       if (destroyed || disabled || retired) {
         return undefined;
@@ -276,16 +351,15 @@ export function createPositionSaveController({
       const olderUpdatePending = [activeUpdate, readyUpdate].some(
         (update) => update && !samePosition(update.position, latestPosition),
       );
-      if (
-        samePosition(latestPosition, savedPosition) &&
-        !olderUpdatePending
-      ) {
+      if (samePosition(latestPosition, savedPosition) && !olderUpdatePending) {
         return undefined;
       }
       const update = latestUpdate();
       return Object.freeze({
         position: validPosition(update.position),
-        observation: Object.freeze(validPositionObservation(update.observation)),
+        observation: Object.freeze(
+          validPositionObservation(update.observation),
+        ),
       });
     },
 

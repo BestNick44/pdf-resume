@@ -176,25 +176,20 @@ test("type checking explains how to install a missing local compiler", async (t)
   );
 });
 
-test("phase three JavaScript files are opted into type checking", async () => {
-  const checkedFiles = [];
+test("every app-owned JavaScript file is opted into type checking", async () => {
+  const uncheckedFiles = [];
 
   for (const filePath of await discoverAppJavaScriptFiles(projectRoot)) {
-    if ((await readFile(filePath, "utf8")).startsWith("// @ts-check\n")) {
-      checkedFiles.push(path.relative(projectRoot, filePath));
+    const relativePath = path.relative(projectRoot, filePath);
+    if (relativePath.startsWith(`test${path.sep}`)) {
+      continue;
+    }
+    if (!(await readFile(filePath, "utf8")).startsWith("// @ts-check\n")) {
+      uncheckedFiles.push(relativePath);
     }
   }
 
-  assert.deepEqual(checkedFiles, [
-    path.join("scripts", "check-format.mjs"),
-    path.join("scripts", "check-syntax.mjs"),
-    path.join("scripts", "check-types.mjs"),
-    path.join("scripts", "project-discovery.mjs"),
-    path.join("scripts", "run-tests.mjs"),
-    path.join("shared", "book-title.mjs"),
-    path.join("shared", "position-update-messaging.mjs"),
-    path.join("storage", "books.mjs"),
-  ]);
+  assert.deepEqual(uncheckedFiles, []);
 });
 
 test("every manifest entry point is a packaged regular file", async () => {
@@ -290,7 +285,10 @@ test("popup and viewer entry points load their app-owned modules", async () => {
   await assertPackagedFile("popup/popup-app.mjs");
   await assertPackagedFile("popup/popup-view.mjs");
   assert.match(viewer, /<script src="viewer\/viewer-entry\.mjs" type="module"><\/script>/i);
-  assert.match(viewerEntry, /^import \{ startViewerApp \} from "\.\/viewer-app\.mjs";/);
+  assert.match(
+    viewerEntry,
+    /^\/\/ @ts-check\n\nimport \{ startViewerApp \} from "\.\/viewer-app\.mjs";/,
+  );
   assert.match(
     viewerApp,
     /import \{\s+getBook,\s+getPositionTrackingState,\s+hydrateMetadata,\s+\} from "\.\.\/storage\/books\.mjs";/,
