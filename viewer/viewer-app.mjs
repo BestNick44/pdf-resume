@@ -10,6 +10,7 @@ import { createPdfJsMetadataHydration } from "./pdfjs-metadata-hydration.mjs";
 import { createPdfJsPositionTracking } from "./pdfjs-position-tracking.mjs";
 import { bootViewer } from "./viewer-boot.mjs";
 import { createViewerView } from "./viewer-view.mjs";
+import { installViewerStartupPrototypeMeasurements } from "./viewer-startup-prototype.mjs";
 
 /** @typedef {import("../types/pdfjs.d.ts").PdfJsFrame} PdfJsFrame */
 /** @typedef {import("../types/storage.d.ts").RecordObservationMessage} RecordObservationMessage */
@@ -109,6 +110,10 @@ export async function startViewerApp({
   const frame = /** @type {PdfJsFrame} */ (
     hostDocument.querySelector("#pdfViewer")
   );
+  installViewerStartupPrototypeMeasurements(frame, {
+    performance: hostWindow.performance,
+    target: hostWindow,
+  });
   const view = createView({
     errorPanel: /** @type {HTMLElement} */ (
       hostDocument.querySelector("#viewerError")
