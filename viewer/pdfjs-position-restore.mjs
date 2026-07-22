@@ -385,10 +385,10 @@ function defendRestoredPosition({
       finish(false);
       return;
     }
-    capTimer = scheduler.setTimeout(
-      () => finish(true),
-      PDF_JS_INITIAL_VIEW_TIMEOUT_MILLISECONDS,
-    );
+    capTimer = scheduler.setTimeout(() => {
+      holdPosition();
+      finish(true);
+    }, PDF_JS_INITIAL_VIEW_TIMEOUT_MILLISECONDS);
     const pagesPromise = pdfViewer.pagesPromise;
     const pagesSettled =
       pagesPromise && typeof pagesPromise.then === "function"
@@ -849,59 +849,20 @@ export async function restorePdfJsPosition({
       return handoffPosition;
     }
 
-    const pageReady = await waitForTargetPage({
-      eventBus,
-      pageNumber,
-      pdfViewer: application.pdfViewer,
-      renderOutcomes,
-      scheduler,
-      signal: active.signal,
-      navigate() {
-        const navigateToPage = () => {
-          application.pdfViewer.currentPageNumber = pageNumber;
-        };
-        if (typeof interaction.runWithoutObserving === "function") {
-          interaction.runWithoutObserving(navigateToPage);
-        } else {
-          navigateToPage();
-        }
-      },
-    });
-    if (!pageReady || !isCurrent()) {
-      return undefined;
-    }
-
-    if (interaction.hasGenuineInteraction()) {
-      if (!(await waitForLayout(scheduler, active.signal)) || !isCurrent()) {
-        return undefined;
+    /** @param {() => void} operation */
+    const runProtected = (operation) => {
+      if (typeof interaction.runWithoutObserving === "function") {
+        interaction.runWithoutObserving(operation);
+      } else {
+        operation();
       }
-      const handoffPosition = currentPosition(
-        application,
-        container,
-        pagesCount,
-      );
-      clampRestoredPosition();
-      startTracking(restoredPosition, handoffPosition);
-      return handoffPosition;
-    }
-
-    if (!(await waitForLayout(scheduler, active.signal)) || !isCurrent()) {
-      return undefined;
-    }
-    if (interaction.hasGenuineInteraction()) {
-      const handoffPosition = currentPosition(
-        application,
-        container,
-        pagesCount,
-      );
-      clampRestoredPosition();
-      startTracking(restoredPosition, handoffPosition);
-      return handoffPosition;
-    }
-
+    };
+    const navigateToTargetPage = () => {
+      application.pdfViewer.currentPageNumber = pageNumber;
+    };
     const applyRestoredPosition = () => {
       if (application.pdfViewer.currentPageNumber !== pageNumber) {
-        application.pdfViewer.currentPageNumber = pageNumber;
+        navigateToTargetPage();
       }
       if (clampRestoredPosition()) {
         container.scrollTop = restoredPosition.scrollTop;
@@ -912,22 +873,71 @@ export async function restorePdfJsPosition({
         pagesCount,
       ).scrollTop;
     };
-    const bounds = clampRestoredPosition();
-    if (bounds) {
-      const restoreScroll = () => {
-        container.scrollTop = restoredPosition.scrollTop;
-      };
-      if (typeof interaction.runWithoutObserving === "function") {
-        interaction.runWithoutObserving(restoreScroll);
-      } else {
-        restoreScroll();
+
+    // The defense must span from the first app-owned navigation, not from the
+    // scroll application: PDF.js's late built-in navigation can land while the
+    // target page is still rendering. Until the full defense below takes over,
+    // this guard re-asserts the target page (the offset is not applied yet).
+    /** @param {PdfJsSourceEvent} [event] */
+    const onTargetPageDisplaced = ({ source } = {}) => {
+      if (
+        source !== application.pdfViewer ||
+        interaction.hasGenuineInteraction() ||
+        application.pdfViewer.currentPageNumber === pageNumber
+      ) {
+        return;
       }
+      runProtected(navigateToTargetPage);
+    };
+    eventBus.on("pagechanging", onTargetPageDisplaced);
+    try {
+      const pageReady = await waitForTargetPage({
+        eventBus,
+        pageNumber,
+        pdfViewer: application.pdfViewer,
+        renderOutcomes,
+        scheduler,
+        signal: active.signal,
+        navigate() {
+          runProtected(navigateToTargetPage);
+        },
+      });
+      if (!pageReady || !isCurrent()) {
+        return undefined;
+      }
+
+      if (interaction.hasGenuineInteraction()) {
+        if (!(await waitForLayout(scheduler, active.signal)) || !isCurrent()) {
+          return undefined;
+        }
+        const handoffPosition = currentPosition(
+          application,
+          container,
+          pagesCount,
+        );
+        clampRestoredPosition();
+        startTracking(restoredPosition, handoffPosition);
+        return handoffPosition;
+      }
+
+      if (!(await waitForLayout(scheduler, active.signal)) || !isCurrent()) {
+        return undefined;
+      }
+      if (interaction.hasGenuineInteraction()) {
+        const handoffPosition = currentPosition(
+          application,
+          container,
+          pagesCount,
+        );
+        clampRestoredPosition();
+        startTracking(restoredPosition, handoffPosition);
+        return handoffPosition;
+      }
+
+      runProtected(applyRestoredPosition);
+    } finally {
+      eventBus.off("pagechanging", onTargetPageDisplaced);
     }
-    restoredPosition.scrollTop = currentPosition(
-      application,
-      container,
-      pagesCount,
-    ).scrollTop;
 
     const defended = await defendRestoredPosition({
       container,
@@ -938,11 +948,7 @@ export async function restorePdfJsPosition({
         application.pdfViewer.currentPageNumber !== pageNumber ||
         container.scrollTop !== restoredPosition.scrollTop,
       reassert() {
-        if (typeof interaction.runWithoutObserving === "function") {
-          interaction.runWithoutObserving(applyRestoredPosition);
-        } else {
-          applyRestoredPosition();
-        }
+        runProtected(applyRestoredPosition);
       },
       scheduler,
       signal: active.signal,

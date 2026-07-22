@@ -312,6 +312,36 @@ test("restore completes even when pagesPromise never resolves within the timeout
   assert.equal(harness.time.pendingCount(), 0);
 });
 
+test("a navigation while the target page renders is re-asserted before handoff", async () => {
+  const pages = deferred();
+  const harness = createRestoreHarness({ pagesReady: pages.promise });
+  const restored = harness.start({ currentPage: 7, scrollTop: 700 });
+  await drainMicrotasks();
+  await harness.advanceLayoutTurn();
+  assert.deepEqual(harness.navigation, [7]);
+
+  harness.application.pdfViewer.currentPageNumber = 3;
+  assert.equal(
+    harness.application.pdfViewer.currentPageNumber,
+    7,
+    "a displacement during target rendering is re-asserted",
+  );
+  assert.deepEqual(harness.navigation, [7, 3, 7]);
+
+  await harness.render(7);
+  await harness.advanceLayoutTurn();
+  assert.equal(harness.container.scrollTop, 700);
+
+  harness.time.advanceBy(10_000);
+  await drainMicrotasks();
+  await restored;
+
+  assert.equal(harness.application.pdfViewer.currentPageNumber, 7);
+  assert.deepEqual(harness.starts, [{ currentPage: 7, scrollTop: 700 }]);
+  assert.equal(harness.eventBus.listenerCount("pagechanging"), 0);
+  assert.equal(harness.time.pendingCount(), 0);
+});
+
 test("restore waits for the target page's render, not other pages", async () => {
   const pages = deferred();
   const harness = createRestoreHarness({ pagesReady: pages.promise });
