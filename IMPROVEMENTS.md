@@ -4,7 +4,20 @@ Decisions distilled from two verified reviews (a performance audit and an archit
 
 Each accepted item has a GitHub issue with strict requirements and acceptance criteria — implement from the issue, not from this summary.
 
-## Accepted work (recommended order)
+## Phase 0: TypeScript adoption (do these first)
+
+A partial typing effort — JSDoc annotations checked by dev-only `tsc --noEmit`, no build step, no `.ts` files — specified in [`docs/typescript-adoption.md`](docs/typescript-adoption.md). These land before the backlog below; every backlog issue carries a "TypeScript interaction" section describing how the two compose.
+
+| # | Issue | What |
+|---|---|---|
+| 0.1 | [#31](https://github.com/BestNick44/pdf-resume/issues/31) | Typecheck infrastructure: dev deps, `tsconfig.json`, `scripts/check-types.mjs`, `npm run check` wiring |
+| 0.2 | [#32](https://github.com/BestNick44/pdf-resume/issues/32) | Annotate tooling scripts and `shared/book-title.mjs` |
+| 0.3 | [#33](https://github.com/BestNick44/pdf-resume/issues/33) | `types/storage.d.ts` + annotate `storage/books.mjs` and messaging |
+| 0.4 | [#34](https://github.com/BestNick44/pdf-resume/issues/34) | `types/pdfjs.d.ts` + annotate background, popup, viewer |
+
+A full JS→TS port was considered and rejected: it would force a build pipeline onto a project whose root is the unpacked extension, and compile-time types cannot replace the runtime validators at trust boundaries (storage contents, cross-context messages). The JSDoc approach captures the shape-checking value without either cost.
+
+## Accepted work (recommended order, after phase 0)
 
 | # | Issue | What | Why it earned a ticket |
 |---|---|---|---|

@@ -8,7 +8,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Use [`docs/brave-validation.md`](docs/brave-validation.md) for reproducible authentic Brave loading and browser evidence. It requires a fresh profile, authenticated PID and flags, `extensions-internals` verification, local-file access proof, and artifact cleanup.
 - Use [`storage/books.mjs`](storage/books.mjs) for all app access to the `books` storage item; [`docs/storage.md`](docs/storage.md) defines its schema, validation, and cross-context serialization contract.
 - The project uses plain JavaScript with no build step or installed dependencies. Use Node.js 20 or newer and run `npm run check` for formatting, static syntax checks, and the full test suite. For a focused contract run, use `node --test test/extension-contract.test.mjs`.
-- [`IMPROVEMENTS.md`](IMPROVEMENTS.md) records the accepted improvement backlog (tracked as issues #23–#30) and the rejected findings with reasons; consult it before proposing performance or architecture changes.
+- [`IMPROVEMENTS.md`](IMPROVEMENTS.md) records the accepted improvement backlog (tracked as issues #23–#34) and the rejected findings with reasons; consult it before proposing performance, architecture, or typing changes. [`docs/typescript-adoption.md`](docs/typescript-adoption.md) is the authoritative contract for the JSDoc/`tsc` typing effort.
 
 ## Maintaining this file
 
