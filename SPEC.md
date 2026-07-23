@@ -35,7 +35,7 @@ Bundle Mozilla's PDF.js viewer inside the extension. Tracking is **opt-in per fi
 - Title resolution order: PDF metadata `Title` field → filename (cleaned) → manual override in popup.
 
 ### 5. Dashboard (popup)
-- On a tracked-book tab: title, current page / total pages, pages remaining, % progress bar, rename field, and "Untrack" button. A book on its known final page can be marked complete; completed books can be moved back to reading.
+- On a tracked-book tab: title, current page / total pages, pages remaining, % progress bar, rename field, "Switch books" (opens the library to open another tracked book in the same tab), and "Untrack" button. A book on its known final page can be marked complete; completed books can be moved back to reading.
 - On any other tab: separate Reading and Completed library lists with per-book progress bars; clicking either kind opens it in the viewer without changing its completion status.
 
 ## Data model (`chrome.storage.local`)
