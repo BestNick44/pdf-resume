@@ -139,8 +139,10 @@ function createHarness({
     getTab: (tabId) => fake.chrome.tabs.get(tabId),
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
     getRuntimeUrl: (path) => fake.chrome.runtime.getURL(path),
-    getBook: books.getBook,
-    listBooks: books.listBooks,
+    completeBook: books.completeBook,
+    getBookWithCompletion: books.getBookWithCompletion,
+    listBooksWithCompletion: books.listBooksWithCompletion,
+    markBookReading: books.markBookReading,
     removeBook: books.removeBook,
     async trackBook(...args) {
       trackCalls += 1;

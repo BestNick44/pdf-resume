@@ -2,14 +2,16 @@
 
 /** @typedef {{ title?: string, filename?: string }} BookDisplayDetails */
 /** @typedef {{ fileUrl: string, title: string, currentPage: number, totalPages: number, progressPercent: number | null }} LibraryBookDetails */
-/** @typedef {{ books?: LibraryBookDetails[], busy?: boolean, error?: string, status?: string }} LibraryDetails */
+/** @typedef {{ books?: LibraryBookDetails[], completedBooks?: LibraryBookDetails[], busy?: boolean, error?: string, status?: string }} LibraryDetails */
 /** @typedef {{ actionLabel?: string, filename?: string, message?: string, persisted?: boolean }} ErrorDetails */
 /** @typedef {{ filename?: string, message?: string, title?: string }} MessageDetails */
 /** @typedef {{ actionLabel?: string, filename?: string }} UntrackedDetails */
-/** @typedef {{ busy?: boolean, customTitle?: string | null, customTitleDraft?: string, currentPage?: number, error?: string, fileAccessRequired?: boolean, pagesRemaining?: number | null, progressPercent?: number | null, status?: string, title?: string, totalPages?: number }} TrackedDetails */
+/** @typedef {{ busy?: boolean, completionAction?: "complete" | "reading" | null, customTitle?: string | null, customTitleDraft?: string, currentPage?: number, error?: string, fileAccessRequired?: boolean, pagesRemaining?: number | null, progressPercent?: number | null, status?: string, title?: string, totalPages?: number }} TrackedDetails */
 /** @typedef {() => void | Promise<void> | undefined} ActivationHandler */
+/** @typedef {() => void | Promise<void> | undefined} CompletionHandler */
 /** @typedef {(fileUrl: string) => void | Promise<void> | undefined} OpenBookHandler */
 /** @typedef {(customTitle: string) => void | Promise<void> | undefined} RenameHandler */
+/** @typedef {() => void | Promise<void> | undefined} SwitchBooksHandler */
 /** @typedef {() => void | Promise<void> | undefined} UntrackHandler */
 
 /**
@@ -80,6 +82,12 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
   const renameButton = /** @type {HTMLButtonElement} */ (
     requireElement(hostDocument, "#renameButton")
   );
+  const completionButton = /** @type {HTMLButtonElement} */ (
+    requireElement(hostDocument, "#completionButton")
+  );
+  const switchBooksButton = /** @type {HTMLButtonElement} */ (
+    requireElement(hostDocument, "#switchBooksButton")
+  );
   const untrackButton = /** @type {HTMLButtonElement} */ (
     requireElement(hostDocument, "#untrackButton")
   );
@@ -89,14 +97,31 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
   const libraryList = /** @type {HTMLElement} */ (
     requireElement(hostDocument, "#libraryList")
   );
+  const libraryPanel = /** @type {HTMLElement} */ (
+    requireElement(hostDocument, "#libraryPanel")
+  );
+  const readingBooksTab = /** @type {HTMLButtonElement} */ (
+    requireElement(hostDocument, "#readingBooksTab")
+  );
+  const completedBooksTab = /** @type {HTMLButtonElement} */ (
+    requireElement(hostDocument, "#completedBooksTab")
+  );
   /** @type {ActivationHandler | undefined} */
   let activationHandler;
+  /** @type {CompletionHandler | undefined} */
+  let completionHandler;
   /** @type {OpenBookHandler | undefined} */
   let openBookHandler;
   /** @type {RenameHandler | undefined} */
   let renameHandler;
+  /** @type {SwitchBooksHandler | undefined} */
+  let switchBooksHandler;
   /** @type {UntrackHandler | undefined} */
   let untrackHandler;
+  /** @type {"reading" | "completed"} */
+  let librarySection = "reading";
+  /** @type {LibraryDetails | undefined} */
+  let libraryDetails;
 
   function onActivate() {
     activationHandler?.();
@@ -106,6 +131,14 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
   function onRename(event) {
     event.preventDefault();
     renameHandler?.(customTitle.value);
+  }
+
+  function onCompletion() {
+    completionHandler?.();
+  }
+
+  function onSwitchBooks() {
+    switchBooksHandler?.();
   }
 
   function onUntrack() {
@@ -128,7 +161,12 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     customTitle.value = "";
     customTitle.disabled = busy;
     renameButton.disabled = busy;
+    completionButton.disabled = busy;
+    completionButton.hidden = true;
+    switchBooksButton.disabled = busy;
     untrackButton.disabled = busy;
+    readingBooksTab.disabled = busy;
+    completedBooksTab.disabled = busy;
     library.hidden = true;
     libraryList.replaceChildren();
     message.hidden = true;
@@ -208,24 +246,98 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     return item;
   }
 
+  /** @param {"reading" | "completed"} section */
+  function selectLibrarySection(section) {
+    librarySection = section;
+    if (libraryDetails) {
+      renderLibrary(libraryDetails);
+    }
+  }
+
+  function onSelectReadingBooks() {
+    selectLibrarySection("reading");
+  }
+
+  function onSelectCompletedBooks() {
+    selectLibrarySection("completed");
+  }
+
+  /** @param {LibraryDetails} details */
+  function renderLibrary(details) {
+    const readingBooks = details.books ?? [];
+    const completedBooks = details.completedBooks ?? [];
+    const books = librarySection === "completed" ? completedBooks : readingBooks;
+    reset({ busy: details.busy });
+    libraryDetails = details;
+    status.textContent =
+      details.status ??
+      (librarySection === "completed" ? "Your completed books" : "Your library");
+    library.hidden = false;
+    readingBooksTab.textContent = `Reading (${readingBooks.length})`;
+    readingBooksTab.setAttribute(
+      "aria-selected",
+      String(librarySection === "reading"),
+    );
+    completedBooksTab.textContent = `Completed (${completedBooks.length})`;
+    completedBooksTab.setAttribute(
+      "aria-selected",
+      String(librarySection === "completed"),
+    );
+    libraryPanel.setAttribute(
+      "aria-labelledby",
+      librarySection === "completed" ? "completedBooksTab" : "readingBooksTab",
+    );
+    libraryList.replaceChildren(
+      ...books.map((bookDetails, index) =>
+        createLibraryBook(bookDetails, details.busy, index),
+      ),
+    );
+    if (books.length === 0) {
+      message.textContent =
+        librarySection === "completed"
+          ? "No completed books yet."
+          : "No books currently being read.";
+      message.hidden = false;
+    }
+    if (details.error) {
+      error.textContent = details.error;
+      error.hidden = false;
+    }
+  }
+
   action.addEventListener("click", onActivate);
+  completionButton.addEventListener("click", onCompletion);
   renameForm.addEventListener("submit", onRename);
+  switchBooksButton.addEventListener("click", onSwitchBooks);
   untrackButton.addEventListener("click", onUntrack);
+  readingBooksTab.addEventListener("click", onSelectReadingBooks);
+  completedBooksTab.addEventListener("click", onSelectCompletedBooks);
 
   return Object.freeze({
     destroy() {
       activationHandler = undefined;
+      completionHandler = undefined;
       openBookHandler = undefined;
       renameHandler = undefined;
+      switchBooksHandler = undefined;
       untrackHandler = undefined;
       action.removeEventListener("click", onActivate);
+      completionButton.removeEventListener("click", onCompletion);
       renameForm.removeEventListener("submit", onRename);
+      switchBooksButton.removeEventListener("click", onSwitchBooks);
       untrackButton.removeEventListener("click", onUntrack);
+      readingBooksTab.removeEventListener("click", onSelectReadingBooks);
+      completedBooksTab.removeEventListener("click", onSelectCompletedBooks);
     },
 
     /** @param {ActivationHandler} handler */
     setActivationHandler(handler) {
       activationHandler = handler;
+    },
+
+    /** @param {CompletionHandler} handler */
+    setCompletionHandler(handler) {
+      completionHandler = handler;
     },
 
     /** @param {OpenBookHandler} handler */
@@ -236,6 +348,11 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
     /** @param {RenameHandler} handler */
     setRenameHandler(handler) {
       renameHandler = handler;
+    },
+
+    /** @param {SwitchBooksHandler} handler */
+    setSwitchBooksHandler(handler) {
+      switchBooksHandler = handler;
     },
 
     /** @param {UntrackHandler} handler */
@@ -272,23 +389,8 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
 
     /** @param {LibraryDetails} [details] */
     showLibrary(details = {}) {
-      const books = details.books ?? [];
-      reset({ busy: details.busy });
-      status.textContent = details.status ?? "Your library";
-      library.hidden = false;
-      libraryList.replaceChildren(
-        ...books.map((bookDetails, index) =>
-          createLibraryBook(bookDetails, details.busy, index),
-        ),
-      );
-      if (books.length === 0) {
-        message.textContent = "No tracked books yet. Open a local PDF to add one.";
-        message.hidden = false;
-      }
-      if (details.error) {
-        error.textContent = details.error;
-        error.hidden = false;
-      }
+      libraryDetails = details;
+      renderLibrary(details);
     },
 
     showLoading() {
@@ -342,6 +444,13 @@ export function createPopupView({ hostDocument = globalThis.document } = {}) {
         progressPercent.textContent = "Progress unavailable";
       }
       customTitle.value = details.customTitleDraft ?? details.customTitle ?? "";
+      if (details.completionAction) {
+        completionButton.textContent =
+          details.completionAction === "reading"
+            ? "Move to reading"
+            : "Complete book";
+        completionButton.hidden = false;
+      }
       if (details.error) {
         error.textContent = details.error;
         error.hidden = false;

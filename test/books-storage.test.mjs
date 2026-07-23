@@ -3,10 +3,14 @@ import test from "node:test";
 
 import {
   BooksStorageDataError,
+  completeBook,
   createBooksStorage,
   getBook,
+  getBookWithCompletion,
   getPositionTrackingState,
   listBooks,
+  listBooksWithCompletion,
+  markBookReading,
   removeBook,
   trackBook,
   updateCustomTitle,
@@ -1036,6 +1040,100 @@ test("get and list return canonical records in code-unit URL order", async () =>
   ]);
 });
 
+test("completion is durable, reversible, and listed separately from the book record", async () => {
+  const finished = canonicalRecord({ currentPage: 300 });
+  const reading = canonicalRecord({ title: "B" });
+  const fake = createChromeStorageFake({
+    books: { [BOOK_A]: finished, [BOOK_B]: reading },
+  });
+  const books = createTestBooksStorage(fake, 1_800_000_000);
+
+  assert.deepEqual(await books.getBookWithCompletion(BOOK_A), {
+    book: finished,
+    completedAt: null,
+  });
+  assert.deepEqual(await books.completeBook(BOOK_A), {
+    book: finished,
+    completedAt: 1_800_000_000,
+  });
+  assert.deepEqual(fake.snapshot().completedBooks, {
+    [BOOK_A]: 1_800_000_000,
+  });
+  assert.deepEqual(await books.listBooksWithCompletion(), [
+    { fileUrl: BOOK_A, book: finished, completedAt: 1_800_000_000 },
+    { fileUrl: BOOK_B, book: reading, completedAt: null },
+  ]);
+  assert.deepEqual(await books.markBookReading(BOOK_A), {
+    book: finished,
+    completedAt: null,
+  });
+  assert.deepEqual(fake.snapshot().completedBooks, {});
+});
+
+test("malformed completion state is rejected without rewriting storage", async (t) => {
+  for (const [name, completedBooks] of [
+    ["array", []],
+    ["noncanonical URL", { "file:///tmp/../tmp/book.pdf": 1_800_000_000 }],
+    ["invalid timestamp", { [BOOK_A]: -1 }],
+    ["untracked completed book", { [BOOK_B]: 1_800_000_000 }],
+  ]) {
+    await t.test(name, async () => {
+      const fake = createChromeStorageFake({
+        books: { [BOOK_A]: canonicalRecord({ currentPage: 300 }) },
+        completedBooks,
+      });
+      const books = createTestBooksStorage(fake);
+
+      await assert.rejects(
+        () => books.listBooksWithCompletion(),
+        BooksStorageDataError,
+      );
+      assert.equal(
+        fake.operations.filter(({ method }) => method === "set").length,
+        0,
+      );
+    });
+  }
+});
+
+test("only a tracked book on its known final page can be completed", async () => {
+  const fake = createChromeStorageFake({
+    books: {
+      [BOOK_A]: canonicalRecord(),
+      [BOOK_B]: canonicalRecord({ currentPage: 1, totalPages: 0 }),
+    },
+  });
+  const books = createTestBooksStorage(fake);
+
+  await assert.rejects(() => books.completeBook(BOOK_A), /final page/i);
+  await assert.rejects(() => books.completeBook(BOOK_B), /final page/i);
+  assert.equal(await books.completeBook(BOOK_LOWERCASE), undefined);
+  assert.equal(
+    fake.operations.filter(({ method }) => method === "set").length,
+    0,
+  );
+});
+
+test("remove deletes completion state with the tracked record", async () => {
+  const recordB = canonicalRecord({ title: "B" });
+  const fake = createChromeStorageFake({
+    books: { [BOOK_A]: canonicalRecord(), [BOOK_B]: recordB },
+    completedBooks: { [BOOK_A]: 1_800_000_000 },
+  });
+  const books = createTestBooksStorage(fake);
+
+  assert.equal(await books.removeBook(BOOK_A), true);
+  assert.deepEqual(fake.snapshot(), {
+    books: { [BOOK_B]: recordB },
+    completedBooks: {},
+  });
+  assert.equal(await books.removeBook(BOOK_A), false);
+  assert.equal(
+    fake.operations.filter(({ method, phase }) => method === "set" && phase === "start").length,
+    1,
+  );
+});
+
 test("remove deletes an existing record and missing removes are no-ops", async () => {
   const recordB = canonicalRecord({ title: "B" });
   const fake = createChromeStorageFake({
@@ -1491,10 +1589,22 @@ test("top-level API resolves Chrome dependencies lazily in extension contexts", 
       ),
       "updated",
     );
-    assert.deepEqual(await getBook(BOOK_A), {
+    const finalBook = {
       ...renamed,
       currentPage: 2,
       scrollTop: 10,
+    };
+    assert.deepEqual(await getBook(BOOK_A), finalBook);
+    await upsertBook(BOOK_A, { totalPages: 2 });
+    const completed = await completeBook(BOOK_A);
+    assert.equal(Number.isSafeInteger(completed.completedAt), true);
+    assert.deepEqual(await getBookWithCompletion(BOOK_A), completed);
+    assert.deepEqual(await listBooksWithCompletion(), [
+      { fileUrl: BOOK_A, ...completed },
+    ]);
+    assert.deepEqual(await markBookReading(BOOK_A), {
+      book: completed.book,
+      completedAt: null,
     });
     assert.equal(await removeBook(BOOK_A), true);
   } finally {
