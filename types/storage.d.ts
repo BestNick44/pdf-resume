@@ -8,6 +8,11 @@ export interface BookRecord {
   lastReadAt: number;
 }
 
+export interface BookWithCompletion {
+  book: BookRecord;
+  completedAt: number | null;
+}
+
 export interface ViewerHighWaterMark {
   effectiveTime: number;
   sequence: number;

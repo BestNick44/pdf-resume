@@ -9,26 +9,39 @@
   </head>
   <body>
     <main id="popupMain" aria-busy="true">
-      <h1>pdf-resume</h1>
-      <p id="popupStatus" class="status" role="status" aria-live="polite">Checking the active tab…</p>
+      <header class="popup-header">
+        <div class="popup-title">
+          <h1>pdf-resume</h1>
+          <p class="popup-subtitle">Local PDF tracker</p>
+        </div>
+      </header>
+      <p id="popupStatus" class="visually-hidden" role="status" aria-live="polite">Checking the active tab…</p>
       <section id="popupBook" aria-labelledby="bookFilename" hidden>
+        <span class="eyebrow">Current book</span>
         <h2 id="bookFilename"></h2>
         <div id="trackedDashboard" hidden>
-          <p id="pageSummary"></p>
-          <p id="pagesRemaining"></p>
+          <div class="book-stats">
+            <p id="pageSummary"></p>
+            <p id="pagesRemaining"></p>
+          </div>
           <div class="progress-row">
             <progress id="progressBar" aria-label="Reading progress" max="100" value="0"></progress>
             <span id="progressPercent"></span>
           </div>
           <form id="renameForm">
-            <label for="customTitle">Custom title</label>
+            <label for="customTitle">Change title</label>
             <input id="customTitle" name="customTitle" type="text" autocomplete="off">
             <button id="renameButton" type="submit">Save title</button>
+            <button id="switchBooksButton" type="button">Switch books</button>
           </form>
-          <button id="untrackButton" type="button">Untrack</button>
+          <div class="book-actions">
+            <button id="completionButton" type="button" hidden>Complete book</button>
+            <button id="untrackButton" type="button">Untrack</button>
+          </div>
         </div>
       </section>
       <section id="fileAccessInstructions" aria-labelledby="fileAccessHeading" hidden>
+        <span class="eyebrow">Permission required</span>
         <h2 id="fileAccessHeading">Enable local file access</h2>
         <ol>
           <li>Open the Brave or Chrome main menu.</li>
@@ -39,12 +52,21 @@
         </ol>
       </section>
       <section id="popupLibrary" aria-labelledby="libraryHeading" hidden>
-        <h2 id="libraryHeading">Tracked books</h2>
-        <ul id="libraryList"></ul>
+        <span class="eyebrow">Library</span>
+        <h2 id="libraryHeading" class="visually-hidden">Tracked books</h2>
+        <div class="library-tabs" role="tablist" aria-label="Library sections">
+          <button id="readingBooksTab" type="button" role="tab" aria-selected="true" aria-controls="libraryPanel">Reading</button>
+          <button id="completedBooksTab" type="button" role="tab" aria-selected="false" aria-controls="libraryPanel">Completed</button>
+        </div>
+        <div id="libraryPanel" role="tabpanel" aria-labelledby="readingBooksTab">
+          <ul id="libraryList"></ul>
+        </div>
       </section>
       <p id="popupMessage" hidden></p>
       <p id="popupError" role="alert" hidden></p>
-      <button id="trackButton" type="button" hidden>Track this book</button>
+      <div class="popup-actions">
+        <button id="trackButton" type="button" hidden>Track this book</button>
+      </div>
     </main>
   </body>
 </html>

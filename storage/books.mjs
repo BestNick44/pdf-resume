@@ -20,6 +20,9 @@ import {
 /** @typedef {import("../types/storage.d.ts").StorageMutationStatus} StorageMutationStatus */
 /** @typedef {import("../types/storage.d.ts").ViewerHighWaterMark} ViewerHighWaterMark */
 /** @typedef {Record<string, BookRecord>} BooksMap */
+/** @typedef {Record<string, number>} CompletedBooksMap */
+/** @typedef {{ book: BookRecord, completedAt: number | null }} BookWithCompletion */
+/** @typedef {{ fileUrl: string, book: BookRecord, completedAt: number | null }} ListedBookWithCompletion */
 /** @typedef {Record<string, unknown>} PositionOrderMap */
 /** @typedef {Pick<BookRecord, "title">} TrackPatch */
 /** @typedef {Partial<Pick<BookRecord, "title" | "customTitle" | "totalPages">>} UpsertPatch */
@@ -40,7 +43,11 @@ import {
 /**
  * @typedef {{
  *   getBook(fileUrl: string): Promise<BookRecord | undefined>,
+ *   getBookWithCompletion(fileUrl: string): Promise<BookWithCompletion | undefined>,
  *   listBooks(): Promise<Array<{ fileUrl: string, book: BookRecord }>>,
+ *   listBooksWithCompletion(): Promise<ListedBookWithCompletion[]>,
+ *   completeBook(fileUrl: string): Promise<BookWithCompletion | undefined>,
+ *   markBookReading(fileUrl: string): Promise<BookWithCompletion | undefined>,
  *   getPositionTrackingState(fileUrl: string, viewerId: string): Promise<PositionTrackingState | undefined>,
  *   trackBook(fileUrl: string, patch: TrackPatch): Promise<BookRecord>,
  *   upsertBook(fileUrl: string, patch: UpsertPatch): Promise<BookRecord>,
@@ -52,6 +59,7 @@ import {
  */
 
 const BOOKS_KEY = "books";
+const COMPLETED_BOOKS_KEY = "completedBooks";
 const POSITION_ORDER_KEY = "positionOrder";
 const BOOKS_LOCK = "pdf-resume:books";
 const BOOKS_LOCK_TIMEOUT_MILLISECONDS = 25_000;
@@ -646,6 +654,57 @@ function comparePositionWinners(left, right) {
 
 /**
  * @param {unknown} storageResult
+ * @returns {CompletedBooksMap}
+ */
+function readCompletedBooks(storageResult) {
+  if (!isPlainObject(storageResult)) {
+    throw new BooksStorageDataError("stored completed books response must be an object");
+  }
+  if (!Object.hasOwn(storageResult, COMPLETED_BOOKS_KEY)) {
+    return {};
+  }
+
+  const storedCompletedBooks = storageResult[COMPLETED_BOOKS_KEY];
+  if (!isPlainObject(storedCompletedBooks)) {
+    throw new BooksStorageDataError("stored completed books must be a plain object");
+  }
+
+  /** @type {CompletedBooksMap} */
+  const completedBooks = {};
+  try {
+    for (const key of Reflect.ownKeys(storedCompletedBooks)) {
+      const descriptor = Object.getOwnPropertyDescriptor(storedCompletedBooks, key);
+      if (
+        typeof key !== "string" ||
+        canonicalFileUrl(key) !== key ||
+        !descriptor ||
+        !("value" in descriptor)
+      ) {
+        throw new TypeError("completed book entries must use canonical URL data properties");
+      }
+      validateTimestamp(descriptor.value, "completedAt");
+      completedBooks[key] = /** @type {number} */ (descriptor.value);
+    }
+  } catch (error) {
+    throw new BooksStorageDataError(
+      `stored completed books are malformed: ${/** @type {Error} */ (error).message}`,
+    );
+  }
+  return completedBooks;
+}
+
+/**
+ * @param {BooksMap} books
+ * @param {CompletedBooksMap} completedBooks
+ */
+function validateCompletedBooksBelongToLibrary(books, completedBooks) {
+  if (Object.keys(completedBooks).some((fileUrl) => !Object.hasOwn(books, fileUrl))) {
+    throw new BooksStorageDataError("completed books must still be tracked");
+  }
+}
+
+/**
+ * @param {unknown} storageResult
  * @returns {BooksMap}
  */
 function readBooks(storageResult) {
@@ -794,6 +853,16 @@ export function createBooksStorage({
         BOOKS_KEY,
       ),
     );
+  }
+
+  async function loadBooksWithCompletion() {
+    const stored = await /** @type {NonNullable<typeof storageArea>} */ (
+      storageArea
+    ).get([BOOKS_KEY, COMPLETED_BOOKS_KEY]);
+    const books = readBooks(stored);
+    const completedBooks = readCompletedBooks(stored);
+    validateCompletedBooksBelongToLibrary(books, completedBooks);
+    return { books, completedBooks };
   }
 
   async function loadOrderedState() {
@@ -949,11 +1018,73 @@ export function createBooksStorage({
       return clone(books[canonicalUrl]);
     },
 
+    async getBookWithCompletion(fileUrl) {
+      const canonicalUrl = canonicalFileUrl(fileUrl);
+      const { books, completedBooks } = await loadBooksWithCompletion();
+      const book = books[canonicalUrl];
+      return book
+        ? { book: clone(book), completedAt: completedBooks[canonicalUrl] ?? null }
+        : undefined;
+    },
+
     async listBooks() {
       const books = await loadBooks();
       return Object.keys(books)
         .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
         .map((fileUrl) => ({ fileUrl, book: clone(books[fileUrl]) }));
+    },
+
+    async listBooksWithCompletion() {
+      const { books, completedBooks } = await loadBooksWithCompletion();
+      return Object.keys(books)
+        .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+        .map((fileUrl) => ({
+          fileUrl,
+          book: clone(books[fileUrl]),
+          completedAt: completedBooks[fileUrl] ?? null,
+        }));
+    },
+
+    async completeBook(fileUrl) {
+      const canonicalUrl = canonicalFileUrl(fileUrl);
+      return mutate(async () => {
+        const { books, completedBooks } = await loadBooksWithCompletion();
+        const book = books[canonicalUrl];
+        if (!book) {
+          return undefined;
+        }
+        if (Object.hasOwn(completedBooks, canonicalUrl)) {
+          return { book: clone(book), completedAt: completedBooks[canonicalUrl] };
+        }
+        if (book.totalPages === 0 || book.currentPage !== book.totalPages) {
+          throw new RangeError("book must be on its known final page to be completed");
+        }
+        const completedAt = currentTimestamp(now);
+        completedBooks[canonicalUrl] = completedAt;
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
+          [COMPLETED_BOOKS_KEY]: completedBooks,
+        });
+        return { book: clone(book), completedAt };
+      });
+    },
+
+    async markBookReading(fileUrl) {
+      const canonicalUrl = canonicalFileUrl(fileUrl);
+      return mutate(async () => {
+        const { books, completedBooks } = await loadBooksWithCompletion();
+        const book = books[canonicalUrl];
+        if (!book) {
+          return undefined;
+        }
+        if (!Object.hasOwn(completedBooks, canonicalUrl)) {
+          return { book: clone(book), completedAt: null };
+        }
+        delete completedBooks[canonicalUrl];
+        await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
+          [COMPLETED_BOOKS_KEY]: completedBooks,
+        });
+        return { book: clone(book), completedAt: null };
+      });
     },
 
     async getPositionTrackingState(fileUrl, viewerId) {
@@ -1124,16 +1255,25 @@ export function createBooksStorage({
     async removeBook(fileUrl) {
       const canonicalUrl = canonicalFileUrl(fileUrl);
       return mutate(async () => {
-        const { books, positionOrder } = await loadOrderedState();
+        const stored = await /** @type {NonNullable<typeof storageArea>} */ (
+          storageArea
+        ).get([BOOKS_KEY, COMPLETED_BOOKS_KEY, POSITION_ORDER_KEY]);
+        const books = readBooks(stored);
+        const completedBooks = readCompletedBooks(stored);
+        validateCompletedBooksBelongToLibrary(books, completedBooks);
+        const positionOrder = readPositionOrder(stored);
         readRelevantPositionOrder(positionOrder, canonicalUrl);
         if (!Object.hasOwn(books, canonicalUrl)) {
           return false;
         }
+        const hadCompletion = Object.hasOwn(completedBooks, canonicalUrl);
         const hadPositionOrder = Object.hasOwn(positionOrder, canonicalUrl);
         delete books[canonicalUrl];
+        delete completedBooks[canonicalUrl];
         delete positionOrder[canonicalUrl];
         await /** @type {NonNullable<typeof storageArea>} */ (storageArea).set({
           [BOOKS_KEY]: books,
+          ...(hadCompletion ? { [COMPLETED_BOOKS_KEY]: completedBooks } : {}),
           ...(hadPositionOrder ? { [POSITION_ORDER_KEY]: positionOrder } : {}),
         });
         return true;
@@ -1172,6 +1312,11 @@ function defaultStorage() {
 /** @param {string} fileUrl */
 export async function getBook(fileUrl) {
   return defaultStorage().getBook(fileUrl);
+}
+
+/** @param {string} fileUrl */
+export async function getBookWithCompletion(fileUrl) {
+  return defaultStorage().getBookWithCompletion(fileUrl);
 }
 
 /**
@@ -1223,6 +1368,20 @@ export async function removeBook(fileUrl) {
 /** @returns {Promise<Array<{ fileUrl: string, book: BookRecord }>>} */
 export async function listBooks() {
   return defaultStorage().listBooks();
+}
+
+export async function listBooksWithCompletion() {
+  return defaultStorage().listBooksWithCompletion();
+}
+
+/** @param {string} fileUrl */
+export async function completeBook(fileUrl) {
+  return defaultStorage().completeBook(fileUrl);
+}
+
+/** @param {string} fileUrl */
+export async function markBookReading(fileUrl) {
+  return defaultStorage().markBookReading(fileUrl);
 }
 
 /**

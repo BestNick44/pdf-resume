@@ -59,6 +59,9 @@ function createViewSpy() {
     showLoading() {
       calls.push(["loading"]);
     },
+    showTracked(details) {
+      calls.push(["tracked", details]);
+    },
   };
 }
 
@@ -102,8 +105,10 @@ function createHarness({
     getTab: (tabId) => fake.chrome.tabs.get(tabId),
     updateTab: (tabId, properties) => fake.chrome.tabs.update(tabId, properties),
     getRuntimeUrl: (path) => fake.chrome.runtime.getURL(path),
-    getBook: books.getBook,
-    listBooks: books.listBooks,
+    completeBook: books.completeBook,
+    getBookWithCompletion: books.getBookWithCompletion,
+    listBooksWithCompletion: books.listBooksWithCompletion,
+    markBookReading: books.markBookReading,
     removeBook: books.removeBook,
     trackBook: books.trackBook,
     updateCustomTitle: books.updateCustomTitle,
@@ -169,6 +174,44 @@ test("non-PDF tabs list every tracked book with title and reading progress", asy
   ]);
 });
 
+test("main library separates reading and completed books", async () => {
+  const harness = createHarness({
+    storage: {
+      books: {
+        [BOOK_A_URL]: canonicalRecord({ title: "Completed A", currentPage: 100 }),
+        [BOOK_B_URL]: canonicalRecord({ title: "Reading B" }),
+      },
+      completedBooks: { [BOOK_A_URL]: 1_800_000_200 },
+    },
+  });
+
+  await harness.app.start();
+
+  assert.deepEqual(harness.view.calls.at(-1), [
+    "library",
+    {
+      books: [
+        {
+          fileUrl: BOOK_B_URL,
+          title: "Reading B",
+          currentPage: 25,
+          totalPages: 100,
+          progressPercent: 25,
+        },
+      ],
+      completedBooks: [
+        {
+          fileUrl: BOOK_A_URL,
+          title: "Completed A",
+          currentPage: 100,
+          totalPages: 100,
+          progressPercent: 100,
+        },
+      ],
+    },
+  ]);
+});
+
 test("library treats a stale-low total as unavailable", async () => {
   const { elements, hostDocument } = createPopupDocumentFake();
   const harness = createHarness({
@@ -196,7 +239,7 @@ test("library treats a stale-low total as unavailable", async () => {
   assert.equal(button.attributes["aria-describedby"], progressLabel.attributes.id);
 });
 
-test("clicking a library book opens it in the viewer on the captured active tab", async () => {
+test("clicking a library book opens it and updates the popup to the tracked dashboard", async () => {
   const harness = createHarness({
     storage: { books: { [BOOK_A_URL]: canonicalRecord({ title: "Metadata A" }) } },
   });
@@ -228,18 +271,14 @@ test("clicking a library book opens it in the viewer on the captured active tab"
     ],
   );
   assert.deepEqual(harness.view.calls.at(-1), [
-    "library",
+    "tracked",
     {
-      books: [
-        {
-          fileUrl: BOOK_A_URL,
-          title: "Metadata A",
-          currentPage: 25,
-          totalPages: 100,
-          progressPercent: 25,
-        },
-      ],
-      status: "Opening Metadata A in the viewer…",
+      title: "Metadata A",
+      customTitle: null,
+      currentPage: 25,
+      totalPages: 100,
+      pagesRemaining: 75,
+      progressPercent: 25,
     },
   ]);
 });
@@ -512,9 +551,20 @@ test("library view renders labelled determinate progress and hides unavailable p
         progressPercent: null,
       },
     ],
+    completedBooks: [
+      {
+        fileUrl: "file:///Users/reader/Books/Finished.pdf",
+        title: "Finished book",
+        currentPage: 40,
+        totalPages: 40,
+        progressPercent: 100,
+      },
+    ],
   });
 
   assert.equal(elements["#popupLibrary"].hidden, false);
+  assert.equal(elements["#readingBooksTab"].textContent, "Reading (2)");
+  assert.equal(elements["#completedBooksTab"].textContent, "Completed (1)");
   assert.equal(elements["#libraryList"].children.length, 2);
   const [firstItem, secondItem] = elements["#libraryList"].children;
   const [firstButton, firstProgressRow] = firstItem.children;
@@ -555,8 +605,25 @@ test("library view renders labelled determinate progress and hides unavailable p
   );
   assert.equal(secondButton.attributes["aria-describedby"], secondProgressLabel.attributes.id);
 
+  elements["#completedBooksTab"].click();
+  assert.equal(elements["#completedBooksTab"].attributes["aria-selected"], "true");
+  assert.equal(
+    elements["#libraryPanel"].attributes["aria-labelledby"],
+    "completedBooksTab",
+  );
+  assert.equal(elements["#libraryList"].children.length, 1);
+  assert.equal(
+    elements["#libraryList"].children[0].children[0].children[0].textContent,
+    "Finished book",
+  );
+  elements["#readingBooksTab"].click();
+  assert.equal(elements["#libraryList"].children.length, 2);
+
   const popupHtml = await readFile(new URL("../popup/popup.html", import.meta.url), "utf8");
   assert.match(popupHtml, /<section id="popupLibrary"[^>]+aria-labelledby="libraryHeading"[^>]+hidden>/);
-  assert.match(popupHtml, /<h2 id="libraryHeading">Tracked books<\/h2>/);
+  assert.match(popupHtml, /<h2 id="libraryHeading" class="visually-hidden">Tracked books<\/h2>/);
+  assert.match(popupHtml, /id="readingBooksTab"[^>]+role="tab"/);
+  assert.match(popupHtml, /id="completedBooksTab"[^>]+role="tab"/);
+  assert.match(popupHtml, /<div id="libraryPanel"[^>]+role="tabpanel"/);
   assert.match(popupHtml, /<ul id="libraryList"><\/ul>/);
 });

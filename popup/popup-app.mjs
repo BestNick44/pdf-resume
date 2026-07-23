@@ -5,17 +5,18 @@ import { canonicalizeLocalPdfUrl } from "../shared/local-pdf-url.mjs";
 import { parseViewerFileQuery } from "../viewer/viewer-url.mjs";
 
 /** @typedef {import("../types/storage.d.ts").BookRecord} BookRecord */
+/** @typedef {import("../types/storage.d.ts").BookWithCompletion} BookWithCompletion */
 /** @typedef {ReturnType<typeof import("./popup-view.mjs").createPopupView>} PopupView */
 /** @typedef {{ fileUrl: string, filename: string, tabId: number, persisted?: boolean }} PopupCandidate */
 /** @typedef {{ tabId: number, url?: string, pendingUrl?: string }} CapturedTabNavigation */
 /** @typedef {NonNullable<NonNullable<Parameters<PopupView["showLibrary"]>[0]>["books"]>[number]} LibraryBookDetails */
 /** @typedef {{ busy?: boolean, customTitleDraft?: string, error?: string, fileAccessRequired?: boolean, status?: string }} TrackedStatus */
-/** @typedef {TrackedStatus & { title: string, customTitle: string | null, currentPage: number, totalPages: number, pagesRemaining: number | null, progressPercent: number | null }} TrackedBookDetails */
+/** @typedef {TrackedStatus & { title: string, customTitle: string | null, currentPage: number, totalPages: number, pagesRemaining: number | null, progressPercent: number | null, completionAction?: "complete" | "reading" }} TrackedBookDetails */
 /** @typedef {{ filename: string, actionLabel: string }} UntrackedDetails */
 /** @typedef {{ filename: string, message: string }} PendingDetails */
 /** @typedef {{ filename?: string, message: string, actionLabel?: string, persisted?: boolean }} ErrorDetails */
 /** @typedef {{ filename: string }} FileAccessDetails */
-/** @typedef {{ books: LibraryBookDetails[], busy?: boolean, error?: string, status?: string }} LibraryDetails */
+/** @typedef {{ books: LibraryBookDetails[], completedBooks?: LibraryBookDetails[], busy?: boolean, error?: string, status?: string }} LibraryDetails */
 /** @typedef {{ title: string, message: string }} RemovedDetails */
 /** @typedef {{ filename: string, message: string }} SuccessDetails */
 /**
@@ -25,8 +26,10 @@ import { parseViewerFileQuery } from "../viewer/viewer-url.mjs";
  *   updateTab: (tabId: number, updateProperties: chrome.tabs.UpdateProperties) => Promise<chrome.tabs.Tab | undefined>,
  *   getRuntimeUrl: (path: string) => string,
  *   isFileSchemeAccessAllowed: () => Promise<boolean>,
- *   getBook: (fileUrl: string) => Promise<BookRecord | undefined>,
- *   listBooks: () => Promise<Array<{ fileUrl: string, book: BookRecord }>>,
+ *   completeBook: (fileUrl: string) => Promise<BookWithCompletion | undefined>,
+ *   getBookWithCompletion: (fileUrl: string) => Promise<BookWithCompletion | undefined>,
+ *   listBooksWithCompletion: () => Promise<Array<{ fileUrl: string, book: BookRecord, completedAt: number | null }>>,
+ *   markBookReading: (fileUrl: string) => Promise<BookWithCompletion | undefined>,
  *   removeBook: (fileUrl: string) => Promise<boolean>,
  *   trackBook: (fileUrl: string, patch: Pick<BookRecord, "title">) => Promise<BookRecord>,
  *   updateCustomTitle: (fileUrl: string, customTitle: string | null) => Promise<BookRecord | undefined>,
@@ -118,11 +121,18 @@ function progressPercent(currentPage, totalPages) {
 
 /**
  * @param {BookRecord} book
+ * @param {number | null} completedAt
  * @param {TrackedStatus} [status]
  * @returns {TrackedBookDetails}
  */
-function trackedBookDetails(book, status = {}) {
+function trackedBookDetails(book, completedAt, status = {}) {
   const totalPages = displayTotalPages(book);
+  const completionAction =
+    completedAt !== null
+      ? "reading"
+      : totalPages > 0 && book.currentPage === totalPages
+        ? "complete"
+        : null;
   return {
     title: book.customTitle ?? book.title,
     customTitle: book.customTitle,
@@ -130,6 +140,7 @@ function trackedBookDetails(book, status = {}) {
     totalPages,
     pagesRemaining: totalPages > 0 ? totalPages - book.currentPage : null,
     progressPercent: progressPercent(book.currentPage, totalPages),
+    ...(completionAction ? { completionAction } : {}),
     ...status,
   };
 }
@@ -206,8 +217,10 @@ export function createPopupApp({
   updateTab,
   getRuntimeUrl,
   isFileSchemeAccessAllowed,
-  getBook,
-  listBooks,
+  completeBook,
+  getBookWithCompletion,
+  listBooksWithCompletion,
+  markBookReading,
   removeBook,
   trackBook,
   updateCustomTitle,
@@ -219,8 +232,10 @@ export function createPopupApp({
     typeof updateTab !== "function" ||
     typeof getRuntimeUrl !== "function" ||
     typeof isFileSchemeAccessAllowed !== "function" ||
-    typeof getBook !== "function" ||
-    typeof listBooks !== "function" ||
+    typeof completeBook !== "function" ||
+    typeof getBookWithCompletion !== "function" ||
+    typeof listBooksWithCompletion !== "function" ||
+    typeof markBookReading !== "function" ||
     typeof removeBook !== "function" ||
     typeof trackBook !== "function" ||
     typeof updateCustomTitle !== "function" ||
@@ -232,9 +247,17 @@ export function createPopupApp({
   /** @type {PopupCandidate | undefined} */
   let candidate;
   let canActivate = false;
+  /** @type {number | null} */
+  let completedAt = null;
   let destroyed = false;
   /** @type {LibraryBookDetails[] | undefined} */
   let libraryBooks;
+  /** @type {LibraryBookDetails[]} */
+  let completedLibraryBooks = [];
+  /** @type {Map<string, BookRecord>} */
+  let libraryBookRecords = new Map();
+  /** @type {Map<string, number | null>} */
+  let libraryCompletionRecords = new Map();
   /** @type {CapturedTabNavigation | undefined} */
   let libraryTab;
   let needsFileAccessInstructions = false;
@@ -262,10 +285,14 @@ export function createPopupApp({
    * @returns {TrackedBookDetails}
    */
   function currentTrackedBookDetails(status = {}) {
-    return trackedBookDetails(/** @type {BookRecord} */ (trackedBook), {
-      ...status,
-      ...(needsFileAccessInstructions ? { fileAccessRequired: true } : {}),
-    });
+    return trackedBookDetails(
+      /** @type {BookRecord} */ (trackedBook),
+      completedAt,
+      {
+        ...status,
+        ...(needsFileAccessInstructions ? { fileAccessRequired: true } : {}),
+      },
+    );
   }
 
   function showReadyCandidate() {
@@ -274,6 +301,36 @@ export function createPopupApp({
       filename: /** @type {PopupCandidate} */ (candidate).filename,
       actionLabel: TRACK_ACTION,
     });
+  }
+
+  function currentLibraryDetails(status = {}) {
+    return {
+      books: /** @type {LibraryBookDetails[]} */ (libraryBooks),
+      ...(completedLibraryBooks.length > 0
+        ? { completedBooks: completedLibraryBooks }
+        : {}),
+      ...status,
+    };
+  }
+
+  async function loadLibraryBooks() {
+    const entries = await listBooksWithCompletion();
+    libraryBooks = entries
+      .filter(({ completedAt: entryCompletedAt }) => entryCompletedAt === null)
+      .map(libraryBookDetails);
+    completedLibraryBooks = entries
+      .filter(({ completedAt: entryCompletedAt }) => entryCompletedAt !== null)
+      .map(libraryBookDetails);
+    libraryBookRecords = new Map(
+      entries.map(({ fileUrl, book }) => [fileUrl, book]),
+    );
+    libraryCompletionRecords = new Map(
+      entries.map(({ fileUrl, completedAt: entryCompletedAt }) => [
+        fileUrl,
+        entryCompletedAt,
+      ]),
+    );
+    return currentLibraryDetails();
   }
 
   async function runActivation() {
@@ -461,6 +518,72 @@ export function createPopupApp({
     return pending;
   }
 
+  async function runCompletionChange() {
+    const movingToReading = completedAt !== null;
+    render(
+      "showTracked",
+      currentTrackedBookDetails({
+        busy: true,
+        status: movingToReading ? "Moving to reading…" : "Completing book…",
+      }),
+    );
+    try {
+      const updated = await (movingToReading ? markBookReading : completeBook)(
+        /** @type {PopupCandidate} */ (candidate).fileUrl,
+      );
+      if (!updated) {
+        const title =
+          /** @type {BookRecord} */ (trackedBook).customTitle ??
+          /** @type {BookRecord} */ (trackedBook).title;
+        trackedBook = undefined;
+        completedAt = null;
+        /** @type {PopupCandidate} */ (candidate).persisted = false;
+        render("showRemoved", { title, message: "This book is no longer tracked." });
+        return;
+      }
+      trackedBook = updated.book;
+      completedAt = updated.completedAt;
+      render(
+        "showTracked",
+        currentTrackedBookDetails({
+          status: movingToReading ? "Moved to reading." : "Book completed.",
+        }),
+      );
+    } catch {
+      render(
+        "showTracked",
+        currentTrackedBookDetails({
+          error: movingToReading
+            ? "This book could not be moved to reading. Try again."
+            : "This book could not be completed. Try again.",
+          status: movingToReading
+            ? "Unable to move book to reading"
+            : "Unable to complete book",
+        }),
+      );
+    }
+  }
+
+  function changeCompletion() {
+    const isOnFinalPage =
+      trackedBook &&
+      trackedBook.totalPages > 0 &&
+      trackedBook.currentPage === trackedBook.totalPages;
+    if (
+      !candidate ||
+      !trackedBook ||
+      (completedAt === null && !isOnFinalPage) ||
+      pending ||
+      destroyed
+    ) {
+      return pending;
+    }
+    pending = runCompletionChange().finally(() => {
+      pending = undefined;
+    });
+    return pending;
+  }
+
   async function runUntrack() {
     const title =
       /** @type {BookRecord} */ (trackedBook).customTitle ??
@@ -472,6 +595,7 @@ export function createPopupApp({
     try {
       await removeBook(/** @type {PopupCandidate} */ (candidate).fileUrl);
       trackedBook = undefined;
+      completedAt = null;
       render("showRemoved", { title, message: "This book is no longer tracked." });
     } catch {
       render(
@@ -494,13 +618,50 @@ export function createPopupApp({
     return pending;
   }
 
+  async function runSwitchBooks() {
+    render(
+      "showTracked",
+      currentTrackedBookDetails({ busy: true, status: "Loading library…" }),
+    );
+    try {
+      const currentTab = await getTab(
+        /** @type {PopupCandidate} */ (candidate).tabId,
+      );
+      libraryTab = captureTabNavigation(
+        /** @type {chrome.tabs.Tab & { id: number }} */ (currentTab),
+      );
+      const library = await loadLibraryBooks();
+      render("showLibrary", library);
+    } catch {
+      render(
+        "showTracked",
+        currentTrackedBookDetails({
+          error: "The library could not be loaded. Try again.",
+          status: "Unable to load library",
+        }),
+      );
+    }
+  }
+
+  function switchBooks() {
+    if (!candidate || !trackedBook || !libraryTab || pending || destroyed) {
+      return pending;
+    }
+    pending = runSwitchBooks().finally(() => {
+      pending = undefined;
+    });
+    return pending;
+  }
+
   /** @param {LibraryBookDetails} book */
   async function runOpenBook(book) {
-    render("showLibrary", {
-      books: /** @type {LibraryBookDetails[]} */ (libraryBooks),
-      busy: true,
-      status: `Opening ${book.title}…`,
-    });
+    render(
+      "showLibrary",
+      currentLibraryDetails({
+        busy: true,
+        status: `Opening ${book.title}…`,
+      }),
+    );
     try {
       if (!(await isFileSchemeAccessAllowed())) {
         render("showFileAccessInstructions", { filename: book.title });
@@ -542,22 +703,34 @@ export function createPopupApp({
       if (openedTab === undefined) {
         throw new Error("the tracked book could not be opened in the viewer");
       }
-      render("showLibrary", {
-        books: /** @type {LibraryBookDetails[]} */ (libraryBooks),
-        status: `Opening ${book.title} in the viewer…`,
-      });
+      candidate = {
+        fileUrl: book.fileUrl,
+        filename: titleFromLocalPdfFilename(book.fileUrl),
+        tabId: /** @type {CapturedTabNavigation} */ (libraryTab).tabId,
+        persisted: true,
+      };
+      trackedBook = /** @type {BookRecord} */ (
+        libraryBookRecords.get(book.fileUrl)
+      );
+      completedAt = libraryCompletionRecords.get(book.fileUrl) ?? null;
+      needsFileAccessInstructions = false;
+      render("showTracked", currentTrackedBookDetails());
     } catch {
-      render("showLibrary", {
-        books: /** @type {LibraryBookDetails[]} */ (libraryBooks),
-        error: `${book.title} could not be opened. Try again.`,
-        status: "Unable to open book",
-      });
+      render(
+        "showLibrary",
+        currentLibraryDetails({
+          error: `${book.title} could not be opened. Try again.`,
+          status: "Unable to open book",
+        }),
+      );
     }
   }
 
   /** @param {string} fileUrl */
   function openBook(fileUrl) {
-    const book = libraryBooks?.find((entry) => entry.fileUrl === fileUrl);
+    const book = [...(libraryBooks ?? []), ...completedLibraryBooks].find(
+      (entry) => entry.fileUrl === fileUrl,
+    );
     if (!book || pending || destroyed) {
       return pending;
     }
@@ -576,29 +749,32 @@ export function createPopupApp({
 
     try {
       const tabs = await queryActiveTab(ACTIVE_TAB_QUERY);
-      candidate = candidateFromTabs(tabs, getRuntimeUrl);
-      if (!candidate) {
-        const [activeTab] = Array.isArray(tabs) ? tabs : [];
-        if (!Number.isInteger(activeTab?.id)) {
-          render("showIneligible");
-          return;
-        }
+      const [activeTab] = Array.isArray(tabs) ? tabs : [];
+      if (Number.isInteger(activeTab?.id)) {
         libraryTab = captureTabNavigation(
           /** @type {chrome.tabs.Tab & { id: number }} */ (activeTab),
         );
-        libraryBooks = (await listBooks()).map(libraryBookDetails);
-        render("showLibrary", { books: libraryBooks });
+      }
+      candidate = candidateFromTabs(tabs, getRuntimeUrl);
+      if (!candidate) {
+        if (!libraryTab) {
+          render("showIneligible");
+          return;
+        }
+        const library = await loadLibraryBooks();
+        render("showLibrary", library);
         return;
       }
 
       const [existing, fileAccessAllowed] = await Promise.all([
-        getBook(candidate.fileUrl),
+        getBookWithCompletion(candidate.fileUrl),
         isFileSchemeAccessAllowed(),
       ]);
       if (existing) {
         candidate.persisted = true;
         canActivate = false;
-        trackedBook = existing;
+        trackedBook = existing.book;
+        completedAt = existing.completedAt;
         needsFileAccessInstructions = !fileAccessAllowed;
         render("showTracked", currentTrackedBookDetails());
         return;
@@ -628,8 +804,19 @@ export function createPopupApp({
   }
 
   view.setActivationHandler(activate);
+  view.setCompletionHandler?.(changeCompletion);
   view.setOpenBookHandler(openBook);
   view.setRenameHandler(rename);
+  view.setSwitchBooksHandler?.(switchBooks);
   view.setUntrackHandler(untrack);
-  return Object.freeze({ activate, destroy, openBook, rename, start, untrack });
+  return Object.freeze({
+    activate,
+    changeCompletion,
+    destroy,
+    openBook,
+    rename,
+    start,
+    switchBooks,
+    untrack,
+  });
 }

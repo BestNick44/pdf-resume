@@ -1,8 +1,10 @@
 // @ts-check
 
 import {
-  getBook,
-  listBooks,
+  completeBook,
+  getBookWithCompletion,
+  listBooksWithCompletion,
+  markBookReading,
   removeBook,
   trackBook,
   updateCustomTitle,
@@ -19,8 +21,10 @@ const app = createPopupApp({
   getTab: (tabId) => tabs.get(tabId),
   updateTab: (tabId, updateProperties) => tabs.update(tabId, updateProperties),
   getRuntimeUrl: (path) => runtime.getURL(path),
-  getBook,
-  listBooks,
+  completeBook,
+  getBookWithCompletion,
+  listBooksWithCompletion,
+  markBookReading,
   removeBook,
   trackBook,
   updateCustomTitle,

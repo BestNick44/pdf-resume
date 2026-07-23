@@ -15,9 +15,14 @@ const POPUP_SELECTORS = Object.freeze([
   "#renameForm",
   "#customTitle",
   "#renameButton",
+  "#completionButton",
+  "#switchBooksButton",
   "#untrackButton",
   "#popupLibrary",
   "#libraryList",
+  "#libraryPanel",
+  "#readingBooksTab",
+  "#completedBooksTab",
 ]);
 
 class FakePopupElement {

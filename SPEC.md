@@ -35,8 +35,8 @@ Bundle Mozilla's PDF.js viewer inside the extension. Tracking is **opt-in per fi
 - Title resolution order: PDF metadata `Title` field → filename (cleaned) → manual override in popup.
 
 ### 5. Dashboard (popup)
-- On a tracked-book tab: title, current page / total pages, pages remaining, % progress bar, "Untrack" button, rename field.
-- On any other tab: library list of all tracked books with per-book progress bars; clicking one opens it in the viewer.
+- On a tracked-book tab: title, current page / total pages, pages remaining, % progress bar, rename field, "Switch books" (opens the library to open another tracked book in the same tab), and "Untrack" button. A book on its known final page can be marked complete; completed books can be moved back to reading.
+- On any other tab: separate Reading and Completed library lists with per-book progress bars; clicking either kind opens it in the viewer without changing its completion status.
 
 ## Data model (`chrome.storage.local`)
 
@@ -52,6 +52,9 @@ Bundle Mozilla's PDF.js viewer inside the extension. Tracking is **opt-in per fi
       "addedAt": 1700000000,
       "lastReadAt": 1700000000
     }
+  },
+  "completedBooks": {
+    "<file:// URL>": 1700000000
   },
   "positionOrder": {
     "<file:// URL>": {
@@ -73,7 +76,7 @@ Bundle Mozilla's PDF.js viewer inside the extension. Tracking is **opt-in per fi
 }
 ```
 
-Both maps are keyed by full `file://` URL (v1 accepts breakage on move/rename; "Untrack + re-track" is the recovery path). `positionOrder` is versioned app-owned metadata containing a tracking-lifetime generation, bounded per-viewer high-water marks, and a transitive winner key. It does not add fields to the authoritative seven-field book record. See [`docs/storage.md`](docs/storage.md) for exact validation, migration, reset, growth, and ordering rules.
+All three maps are keyed by full `file://` URL (v1 accepts breakage on move/rename; "Untrack + re-track" is the recovery path). `completedBooks` maps completed tracked books to non-negative Unix-second completion timestamps; removing a book removes its completion marker. `positionOrder` is versioned app-owned metadata containing a tracking-lifetime generation, bounded per-viewer high-water marks, and a transitive winner key. Neither auxiliary map adds fields to the authoritative seven-field book record. See [`docs/storage.md`](docs/storage.md) for exact validation, migration, reset, growth, and ordering rules.
 
 ## Architecture
 
